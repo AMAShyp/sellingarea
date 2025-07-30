@@ -3,13 +3,12 @@ from db_handler import DatabaseManager
 import plotly.graph_objects as go
 from PIL import Image
 
-# --- MAP HANDLER (basic version; adjust as needed) ---
+# --- MAP HANDLER (use your own implementation!) ---
 class ShelfMapHandler:
     def get_locations(self):
-        # Replace this with actual DB loading or file logic
-        # Example row: {"locid": "rd26", "x_pct": 0.30, "y_pct": 0.55, "w_pct": 0.10, "h_pct": 0.06, "rotation_deg": 0}
+        # Replace with your real loader or DB
         return [
-            # Add real locations here...
+            # Example: {"locid": "r12g2", "x_pct": 0.30, "y_pct": 0.55, "w_pct": 0.10, "h_pct": 0.06, "rotation_deg": 0}
         ]
     def get_png_path(self):
         return "assets/shelf_map.png"
@@ -25,11 +24,12 @@ def _img_ratio(path: str) -> float:
         return 1.0
 
 @st.cache_data(ttl=3600)
-def load_locations(handler):
-    return handler.get_locations()
+def load_locations(_handler):
+    return _handler.get_locations()
+
 @st.cache_resource
-def load_bg(handler):
-    return Image.open(handler.get_png_path())
+def load_bg(_handler):
+    return Image.open(_handler.get_png_path())
 
 def shelf_map_for_loc(locid, locs, img, png_ratio):
     shapes = []
@@ -46,6 +46,7 @@ def shelf_map_for_loc(locid, locs, img, png_ratio):
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
         else:
+            import math
             rad = math.radians(deg)
             cos, sin = math.cos(rad), math.sin(rad)
             pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
@@ -62,7 +63,7 @@ def shelf_map_for_loc(locid, locs, img, png_ratio):
             source=img, xref="x", yref="y",
             x=0, y=1, sizex=1, sizey=1,
             xanchor="left", yanchor="top", layer="below"))
-    fig.update_layout(shapes=shapes, height=180, margin=dict(l=5,r=5,t=5,b=5))
+    fig.update_layout(shapes=shapes, height=160, margin=dict(l=5,r=5,t=5,b=5))
     fig.update_xaxes(visible=False, range=[0,1], constrain="domain")
     fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=png_ratio)
     fig.update_traces(hoverinfo="skip", selector=dict(type="scatter"))
@@ -143,11 +144,11 @@ img_ratio = _img_ratio(map_handler.get_png_path())
 st.markdown("""
 <style>
 .item-card {
-    padding: 0.4rem 0.5rem;
+    padding: 0.32rem 0.52rem;
     border-radius: 0.7rem;
-    background: #f7fcfa;
+    background: #f8fdfc;
     border: 1px solid #c7ebe5;
-    font-size: 1.08em;
+    font-size: 1.04em;
     margin-bottom: 0;
 }
 .success-text { color: green; font-weight: bold; margin-top: 0.1em; }
@@ -157,8 +158,8 @@ st.markdown("""
     color: white !important;
     font-weight: bold;
     border-radius: 0.5rem !important;
-    padding: 0.3rem 0.8rem !important;
-    margin-top: 0.25em;
+    padding: 0.21rem 0.7rem !important;
+    margin-top: 0.1em;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -168,7 +169,6 @@ for idx, row in low_items.iterrows():
     if not expiry_layer:
         st.error(f"❌ Inventory data missing for {row['itemname']}.")
         continue
-
     shelfqty = int(row["shelfqty"])
     shelfthreshold = int(row["shelfthreshold"])
     to_transfer = max(1, shelfthreshold - shelfqty)
@@ -180,35 +180,25 @@ for idx, row in low_items.iterrows():
     barcode_key = f"barcode_{row['itemid']}"
     button_key = f"refill_{row['itemid']}"
 
-    cols = st.columns([1.1, 3, 1, 1.8, 0.9])
-    # Map (no gap, no container)
+    cols = st.columns([1.07, 2.95, 1, 1.55, 0.7])
     if locid:
         fig = shelf_map_for_loc(locid, locs, bg_img, img_ratio)
         cols[0].plotly_chart(fig, use_container_width=True)
     else:
         cols[0].info("No location", icon="🗺️")
-
-    # Item card (very tight spacing)
     cols[1].markdown(
         f"<div class='item-card'><b>{row['itemname']}</b><br>"
         f"📦 Shelf: {shelfqty}/{shelfthreshold} | 🗺️ {locid}<br>"
-        f"<span style='font-size:0.96em;'>🔖 <span style='font-family:monospace;'>{row['barcode']}</span></span></div>",
-        unsafe_allow_html=True
-    )
-
-    # Quantity (tight)
+        f"<span style='font-size:0.95em;'>🔖 <span style='font-family:monospace;'>{row['barcode']}</span></span></div>",
+        unsafe_allow_html=True)
     qty = cols[2].number_input("Qty", 1, avail_qty, suggested_qty, key=qty_key, label_visibility="collapsed")
-
-    # Barcode input (tight)
     barcode_input = cols[3].text_input("Barcode", key=barcode_key, placeholder="Scan barcode...", label_visibility="collapsed")
     barcode_correct = barcode_input.strip() == row["barcode"]
     if barcode_input:
         if barcode_correct:
-            cols[3].markdown("<div class='success-text'>✅ Barcode matched</div>", unsafe_allow_html=True)
+            cols[3].markdown("<div class='success-text'>✅</div>", unsafe_allow_html=True)
         else:
-            cols[3].markdown("<div class='error-text'>❌ Incorrect barcode</div>", unsafe_allow_html=True)
-
-    # Button (tight, aligned)
+            cols[3].markdown("<div class='error-text'>❌</div>", unsafe_allow_html=True)
     refill_clicked = cols[4].button("🚚", key=button_key, disabled=not barcode_correct, help="Refill", type="primary")
     if refill_clicked:
         user = st.session_state.get("user_email", "AutoTransfer")
