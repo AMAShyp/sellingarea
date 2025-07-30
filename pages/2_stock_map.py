@@ -6,7 +6,7 @@ from PIL import Image
 # --- MAP HANDLER ---
 class ShelfMapHandler:
     def get_locations(self):
-        # Replace with your real loader/DB logic
+        # Replace with your real loader/DB logic!
         return [
             # Example: {"locid": "r12g2", "x_pct": 0.30, "y_pct": 0.55, "w_pct": 0.10, "h_pct": 0.06, "rotation_deg": 0}
         ]
@@ -26,11 +26,12 @@ def _img_ratio(path: str) -> float:
 @st.cache_data(ttl=3600)
 def load_locations(_handler):
     return _handler.get_locations()
+
 @st.cache_resource
 def load_bg(_handler):
     return Image.open(_handler.get_png_path())
 
-def map_with_highlights(locs, highlight_locs, img, png_ratio):
+def map_with_grey_and_red(locs, highlight_locs, img, png_ratio):
     import math
     shapes = []
     for row in locs:
@@ -40,8 +41,9 @@ def map_with_highlights(locs, highlight_locs, img, png_ratio):
         cy = 1 - (y + h/2)
         y_draw = 1 - y - h
         is_hi = row["locid"] in highlight_locs if highlight_locs else False
-        fill = "rgba(26,188,156,0.09)" if not is_hi else "rgba(255,128,0,0.22)"
-        line = dict(width=2 if is_hi else 1, color="#FF8000" if is_hi else "#1ABC9C")
+        # GREY for all, STRONG RED/ORANGE for highlights
+        fill = "rgba(100,100,100,0.10)" if not is_hi else "rgba(255,36,0,0.32)"
+        line = dict(width=2 if is_hi else 1.3, color="#FF2400" if is_hi else "#a6a6a6")
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
         else:
@@ -54,7 +56,7 @@ def map_with_highlights(locs, highlight_locs, img, png_ratio):
             r = max(w, h) * 0.55
             shapes.append(dict(type="circle", xref="x", yref="y",
                                x0=cx - r, x1=cx + r, y0=cy - r, y1=cy + r,
-                               line=dict(color="#FF8000", width=2, dash="dot")))
+                               line=dict(color="#FF2400", width=2, dash="dot")))
     fig = go.Figure()
     if img is not None:
         fig.add_layout_image(dict(
@@ -141,17 +143,15 @@ img_ratio = _img_ratio(map_handler.get_png_path())
 
 # --- Find all locations to highlight ---
 highlight_locs = []
-item_locids = []
 for idx, row in low_items.iterrows():
     expiry_layer = handler.get_first_expiry_for_item(row["itemid"])
     if expiry_layer and expiry_layer.get("locid"):
         highlight_locs.append(expiry_layer["locid"])
-        item_locids.append(expiry_layer["locid"])
 highlight_locs = list(sorted(set(highlight_locs)))
 
-# --- Render MAP (one map for all) ---
-fig = map_with_highlights(locs, highlight_locs, bg_img, img_ratio)
-st.markdown("#### 🗺️ Shelves with items to refill are highlighted below:")
+# --- Render GREY MAP with only red highlights ---
+fig = map_with_grey_and_red(locs, highlight_locs, bg_img, img_ratio)
+st.markdown("#### 🗺️ Only shelves needing refill are shown in <span style='color:#FF2400;font-weight:bold;'>red</span>:", unsafe_allow_html=True)
 st.plotly_chart(fig, use_container_width=True, key="main_map")
 
 # --- List items below the map ---
