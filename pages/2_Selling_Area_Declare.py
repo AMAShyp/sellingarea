@@ -56,7 +56,7 @@ class DeclareHandler(DatabaseManager):
             left -= take
             if left <= 0:
                 break
-        return qty - left  # actual subtracted
+        return qty - left
 
     def set_shelf_quantity(self, itemid, locid, qty):
         exists = self.fetch_data(
@@ -163,20 +163,15 @@ def declare_logic(barcode, reset_callback):
         st.error("❌ Barcode not found in the item table.")
 
 def reset_camera_scan():
-    st.session_state.pop("barcode_cam", None)
-    st.session_state.pop("barcode_input", None)
-    st.session_state.pop("declare_qty", None)
-    st.session_state.pop("declare_locid", None)
+    for k in ["barcode_cam", "barcode_input", "declare_qty", "declare_locid"]:
+        if k in st.session_state:
+            st.session_state.pop(k)
 
 with tab1:
     barcode = ""
     if QR_AVAILABLE:
         st.markdown("<div class='scan-hint'>Aim the barcode at your phone or webcam for instant detection.<br>Hold steady and close to the lens.</div>", unsafe_allow_html=True)
-        barcode = qrcode_scanner(
-            key="barcode_cam",
-            min_confidence=0.45,  # more sensitive
-            box_color="#3ee22a"   # green box for positive scan
-        ) or ""
+        barcode = qrcode_scanner(key="barcode_cam") or ""
         if barcode:
             st.success(f"Scanned: {barcode}")
         declare_logic(barcode, reset_camera_scan)
@@ -185,4 +180,4 @@ with tab1:
 
 with tab2:
     barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
-    declare_logic(barcode, lambda: st.session_state.update({"barcode_input": "", "declare_qty": 0, "declare_locid": ""}))
+    declare_logic(barcode, lambda: reset_camera_scan())
