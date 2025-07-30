@@ -91,10 +91,10 @@ st.markdown("""
 
 tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 
-def declare_logic(barcode):
+def declare_logic(barcode, reset_callback):
     if not barcode:
         st.info("Please scan or enter the item barcode.")
-        st.stop()
+        return
 
     item = handler.get_item_by_barcode(barcode)
     if item is not None:
@@ -131,7 +131,14 @@ def declare_logic(barcode):
 
         new_qty = st.number_input("Declare current selling area quantity", min_value=0, value=prev_qty, step=1, key="declare_qty")
 
-        confirm = st.button("✅ Confirm Declaration", type="primary")
+        col1, col2 = st.columns([2,1])
+        with col1:
+            confirm = st.button("✅ Confirm Declaration", type="primary")
+        with col2:
+            if st.button("🔄 New Scan", type="secondary"):
+                reset_callback()
+                st.rerun()
+
         if confirm:
             diff = new_qty - prev_qty
             if diff > 0:
@@ -145,16 +152,22 @@ def declare_logic(barcode):
     elif barcode.strip():
         st.error("❌ Barcode not found in the item table.")
 
+def reset_camera_scan():
+    st.session_state.pop("barcode_cam", None)
+    st.session_state.pop("barcode_input", None)
+    st.session_state.pop("declare_qty", None)
+    st.session_state.pop("declare_locid", None)
+
 with tab1:
     barcode = ""
     if QR_AVAILABLE:
         barcode = qrcode_scanner(key="barcode_cam") or ""
         if barcode:
             st.success(f"Scanned: {barcode}")
-        declare_logic(barcode)
+        declare_logic(barcode, reset_camera_scan)
     else:
         st.warning("Camera scanning not available. Please use tab 2 or `pip install streamlit-qrcode-scanner`.")
 
 with tab2:
     barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
-    declare_logic(barcode)
+    declare_logic(barcode, lambda: st.session_state.update({"barcode_input": "", "declare_qty": 0, "declare_locid": ""}))
