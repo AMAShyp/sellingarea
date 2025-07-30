@@ -89,70 +89,72 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-barcode = ""
-barcode_mode = st.radio("Choose barcode input method:", ["Type / Scan in input box", "Scan via phone camera"])
+tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 
-if barcode_mode == "Type / Scan in input box":
+def declare_logic(barcode):
+    if not barcode:
+        st.info("Please scan or enter the item barcode.")
+        st.stop()
+
+    item = handler.get_item_by_barcode(barcode)
+    if item is not None:
+        st.markdown(f"**Item:** {item['name']}<br>🔖 Barcode: `{item['barcode']}`", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='catline'><span class='cat-class'>Class:</span> <span class='cat-val'>{item['classcat']}</span></div>"
+            f"<div class='catline'><span class='cat-dept'>Department:</span> <span class='cat-val'>{item['departmentcat']}</span></div>"
+            f"<div class='catline'><span class='cat-sect'>Section:</span> <span class='cat-val'>{item['sectioncat']}</span></div>"
+            f"<div class='catline'><span class='cat-family'>Family:</span> <span class='cat-val'>{item['familycat']}</span></div>",
+            unsafe_allow_html=True)
+        itemid = int(item['itemid'])
+        shelf_entries = handler.get_shelf_entries(itemid)
+        inventory_total = handler.get_inventory_total(itemid)
+
+        if shelf_entries.empty:
+            st.warning("No previous quantity declared for this item in the selling area.")
+            default_locid = st.text_input("Shelf Location (locid)", key="declare_locid", max_chars=32)
+            if not default_locid:
+                st.stop()
+            prev_qty = 0
+            locations = [default_locid]
+        else:
+            locations = shelf_entries['locid'].tolist()
+            prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
+
+        if len(locations) > 1:
+            locid = st.selectbox("Shelf Location (locid)", locations)
+            prev_qty = int(shelf_entries[shelf_entries['locid'] == locid]['qty'].iloc[0])
+        else:
+            locid = locations[0]
+
+        st.info(f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
+                f"**Available in inventory:** {inventory_total}")
+
+        new_qty = st.number_input("Declare current selling area quantity", min_value=0, value=prev_qty, step=1, key="declare_qty")
+
+        confirm = st.button("✅ Confirm Declaration", type="primary")
+        if confirm:
+            diff = new_qty - prev_qty
+            if diff > 0:
+                actual_subtracted = handler.subtract_inventory(itemid, diff)
+                st.success(f"Inventory reduced by {actual_subtracted}.")
+            elif diff < 0:
+                st.info("Declared quantity is less than previous; only updating shelf record, not adding back to inventory.")
+            handler.set_shelf_quantity(itemid, locid, new_qty)
+            st.success(f"Selling area quantity for '{item['name']}' at {locid} is now {new_qty}.")
+            st.rerun()
+    elif barcode.strip():
+        st.error("❌ Barcode not found in the item table.")
+
+with tab1:
+    barcode = ""
+    if QR_AVAILABLE:
+        barcode = qrcode_scanner(key="barcode_cam") or ""
+        if barcode:
+            st.success(f"Scanned: {barcode}")
+        declare_logic(barcode)
+    else:
+        st.warning("Camera scanning not available. Please use tab 2 or `pip install streamlit-qrcode-scanner`.")
+
+with tab2:
     barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
-elif QR_AVAILABLE:
-    scanned = qrcode_scanner(key="barcode_cam")
-    barcode = scanned or ""
-    if barcode:
-        st.success(f"Scanned: {barcode}")
-    else:
-        st.info("Open camera, show barcode in view.")
-else:
-    st.warning("Camera scanning component not installed. Please use the input box, or `pip install streamlit-qrcode-scanner`.")
-
-if not barcode:
-    st.info("Please scan or enter the item barcode.")
-    st.stop()
-
-item = handler.get_item_by_barcode(barcode)
-if item is not None:
-    st.markdown(f"**Item:** {item['name']}<br>🔖 Barcode: `{item['barcode']}`", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='catline'><span class='cat-class'>Class:</span> <span class='cat-val'>{item['classcat']}</span></div>"
-        f"<div class='catline'><span class='cat-dept'>Department:</span> <span class='cat-val'>{item['departmentcat']}</span></div>"
-        f"<div class='catline'><span class='cat-sect'>Section:</span> <span class='cat-val'>{item['sectioncat']}</span></div>"
-        f"<div class='catline'><span class='cat-family'>Family:</span> <span class='cat-val'>{item['familycat']}</span></div>",
-        unsafe_allow_html=True)
-    itemid = int(item['itemid'])
-    shelf_entries = handler.get_shelf_entries(itemid)
-    inventory_total = handler.get_inventory_total(itemid)
-
-    if shelf_entries.empty:
-        st.warning("No previous quantity declared for this item in the selling area.")
-        default_locid = st.text_input("Shelf Location (locid)", key="declare_locid", max_chars=32)
-        if not default_locid:
-            st.stop()
-        prev_qty = 0
-        locations = [default_locid]
-    else:
-        locations = shelf_entries['locid'].tolist()
-        prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
-
-    if len(locations) > 1:
-        locid = st.selectbox("Shelf Location (locid)", locations)
-        prev_qty = int(shelf_entries[shelf_entries['locid'] == locid]['qty'].iloc[0])
-    else:
-        locid = locations[0]
-
-    st.info(f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
-            f"**Available in inventory:** {inventory_total}")
-
-    new_qty = st.number_input("Declare current selling area quantity", min_value=0, value=prev_qty, step=1, key="declare_qty")
-
-    confirm = st.button("✅ Confirm Declaration", type="primary")
-    if confirm:
-        diff = new_qty - prev_qty
-        if diff > 0:
-            actual_subtracted = handler.subtract_inventory(itemid, diff)
-            st.success(f"Inventory reduced by {actual_subtracted}.")
-        elif diff < 0:
-            st.info("Declared quantity is less than previous; only updating shelf record, not adding back to inventory.")
-        handler.set_shelf_quantity(itemid, locid, new_qty)
-        st.success(f"Selling area quantity for '{item['name']}' at {locid} is now {new_qty}.")
-        st.rerun()
-elif barcode.strip():
-    st.error("❌ Barcode not found in the item table.")
+    declare_logic(barcode)
