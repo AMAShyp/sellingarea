@@ -7,7 +7,7 @@ class BarcodeShelfHandler(DatabaseManager):
     def get_low_stock_items(self, thr=10, limit=10):
         return self.fetch_data("""
             SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode,
-                   s.totalquantity AS shelfqty,i.shelfthreshold
+                   s.totalquantity AS shelfqty, i.shelfthreshold, i.shelfaverage
             FROM item i
             JOIN (SELECT itemid,SUM(quantity) AS totalquantity FROM shelf GROUP BY itemid) s
                  ON i.itemid=s.itemid
@@ -34,7 +34,7 @@ class BarcodeShelfHandler(DatabaseManager):
             INSERT INTO shelfentries(itemid,expirationdate,quantity,createdby,locid)
             VALUES (%s,%s,%s,%s,%s)""",(itemid,expiration,qty,by,locid))
 
-def map_with_highlights(locs, highlight_locs, label_offset=0.05):
+def map_with_highlights(locs, highlight_locs, label_offset=0.018):
     import math
     shapes = []
     for row in locs:
@@ -63,13 +63,12 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.05):
                       plot_bgcolor="#f8f9fa")
     fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
-    # Only label shelves that are in highlight_locs, and SHIFT the label up
     for row in locs:
         if row["locid"] in highlight_locs:
             x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
             fig.add_annotation(
                 x=x + w/2,
-                y=1 - (y + h/2) + label_offset,  # shift label up
+                y=1 - (y + h/2) + label_offset,
                 text=row.get("label",row["locid"]),
                 showarrow=False,
                 font=dict(size=11, color="#c90000", family="monospace"),
@@ -84,7 +83,8 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.05):
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (Only Red Labels Above Shelves To Refill)")
+st.title("📤 Low-Stock Items Map (Default quantity: shelfaverage minus shelfqty)")
+
 low_items = handler.get_low_stock_items()
 if low_items.empty:
     st.success("✅ All items sufficiently stocked."); st.stop()
@@ -107,12 +107,18 @@ for r in low_items.itertuples():
     layer = handler.get_first_layer(r.itemid)
     if not layer: continue
     locid = layer.get("locid","")
-    avail = int(layer["quantity"]); need = max(1,int(r.shelfthreshold)-int(r.shelfqty))
-    sugg  = min(need,avail)
+    avail = int(layer["quantity"])
+    shelfavg = getattr(r,"shelfaverage",None)
+    # Use shelfaverage - shelfqty as default, fallback to 1 if not possible
+    try:
+        needed = max(1, int(float(shelfavg)) - int(r.shelfqty)) if shelfavg is not None else 1
+    except Exception:
+        needed = 1
+    sugg  = min(needed,avail)
     qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
     c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
     c1.markdown(f"<div class='item-card'><b>{r.itemname}</b><br>"
-                f"📦 {r.shelfqty}/{r.shelfthreshold} | 🗺️ {locid}<br>"
+                f"📦 {r.shelfqty}/{r.shelfthreshold} (avg: {shelfavg if shelfavg is not None else '-'} ) | 🗺️ {locid}<br>"
                 f"🔖 <span style='font-family:monospace'>{r.barcode}</span></div>",unsafe_allow_html=True)
     qty = c2.number_input("",1,avail,sugg,key=qk,label_visibility="collapsed")
     bc  = c3.text_input("",key=bck,placeholder="scan",label_visibility="collapsed")
