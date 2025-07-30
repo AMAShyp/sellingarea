@@ -9,9 +9,9 @@ class BarcodeShelfHandler(DatabaseManager):
             SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode,
                    s.totalquantity AS shelfqty,
                    i.shelfthreshold, i.shelfaverage,
-                   s2.locid
+                   s2.quantity as shelf_current_qty, s2.locid
             FROM item i
-            JOIN (SELECT itemid, SUM(quantity) AS totalquantity FROM shelf GROUP BY itemid) s
+            JOIN (SELECT itemid,SUM(quantity) AS totalquantity FROM shelf GROUP BY itemid) s
                  ON i.itemid=s.itemid
             JOIN shelf s2 ON s2.itemid = i.itemid
             WHERE s.totalquantity <= COALESCE(i.shelfthreshold,%s)
@@ -91,7 +91,7 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (Default: refill to shelfaverage if possible)")
+st.title("📤 Low-Stock Items Map (Refill allowed: 1 to shelfaverage-current)")
 
 low_items = handler.get_low_stock_items()
 if low_items.empty:
@@ -117,28 +117,35 @@ for r in low_items.itertuples():
     if not layer: continue
     locid = getattr(r, "locid", layer.get("locid",""))
     current_qty = int(r.shelfqty)
-    shelfthreshold = int(getattr(r, "shelfthreshold", 1))
     shelfavg = float(getattr(r, "shelfaverage", 0) or 0)
-    # The "max refill" is up to shelfaverage (target), only if greater than current
-    needed = int(shelfavg - current_qty) if shelfavg > current_qty else 0
-    if needed <= 0:
-        # At or above average: cannot refill more
+    # Only allow refill if shelfaverage > current
+    if shelfavg <= current_qty:
         c1, c2 = st.columns([3, 2])
         c1.markdown(
-            f"<div class='fullcard'><b>{r.itemname}</b> — Already at or above target average.<br>"
-            f"📦 {current_qty} (thr: {shelfthreshold}, avg: {shelfavg}) | 🗺️ {locid}<br>"
+            f"<div class='fullcard'><b>{r.itemname}</b> — Already at or above average.<br>"
+            f"📦 {current_qty} (avg: {shelfavg}) | 🗺️ {locid}<br>"
             f"🔖 <span style='font-family:monospace'>{r.barcode}</span></div>",
             unsafe_allow_html=True)
-        c2.button("✅ At Average", disabled=True, key=f"btn_full_{r.itemid}")
+        c2.button("✅ At/Above Average", disabled=True, key=f"btn_full_{r.itemid}")
+        continue
+    max_refill = int(shelfavg - current_qty)
+    if max_refill < 1:
+        c1, c2 = st.columns([3, 2])
+        c1.markdown(
+            f"<div class='fullcard'><b>{r.itemname}</b> — No refill possible.<br>"
+            f"📦 {current_qty} (avg: {shelfavg}) | 🗺️ {locid}<br>"
+            f"🔖 <span style='font-family:monospace'>{r.barcode}</span></div>",
+            unsafe_allow_html=True)
+        c2.button("⛔ Cannot Refill", disabled=True, key=f"btn_nofill_{r.itemid}")
         continue
     qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
     c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
     c1.markdown(f"<div class='item-card'><b>{r.itemname}</b><br>"
-                f"📦 {current_qty} (thr: {shelfthreshold}, avg: {shelfavg}) | 🗺️ {locid}<br>"
+                f"📦 {current_qty} (avg: {shelfavg}) | 🗺️ {locid}<br>"
                 f"🔖 <span style='font-family:monospace'>{r.barcode}</span></div>",unsafe_allow_html=True)
     qty = c2.number_input(
-        "", min_value=1, max_value=needed,
-        value=needed, key=qk, label_visibility="collapsed"
+        "", min_value=1, max_value=max_refill,
+        value=max_refill, key=qk, label_visibility="collapsed"
     )
     bc  = c3.text_input("",key=bck,placeholder="scan",label_visibility="collapsed")
     ok  = bc.strip()==r.barcode
