@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from db_handler import DatabaseManager
 
-# ────────────────────── Handler Class ──────────────────────
+# ───── Handler ─────
 class BarcodeShelfHandler(DatabaseManager):
     def get_all_shelf_items(self, limit=20):
         return self.fetch_data(
@@ -79,7 +79,7 @@ class BarcodeShelfHandler(DatabaseManager):
             (itemid, expiration, qty, by, locid),
         )
 
-# ───────────────────────────── App Page ─────────────────────────────
+# ───── Page ─────
 handler = BarcodeShelfHandler()
 
 st.subheader("📤 Auto Transfer: 10 Lowest Stock Items (At or Below Threshold 10)")
@@ -96,7 +96,6 @@ st.dataframe(
 
 # Get low stock candidates (at or below threshold)
 low_items = handler.get_low_stock_items(threshold=10, limit=10)
-st.write("DEBUG: low_items shape", low_items.shape)
 st.markdown("#### 🛑 Low Stock Candidates (at or below threshold 10)")
 st.dataframe(
     low_items[show_cols],
@@ -143,11 +142,13 @@ if not editable.empty:
     for i in range(len(editable)):
         col1, col2, col3 = st.columns([2, 2, 2])
         col1.markdown(f"**{editable.loc[i, 'itemname']}** (Barcode: {editable.loc[i, 'barcode']})")
+        avail_qty = max(1, int(editable.loc[i, "available_qty"]))  # never below 1
+        sugg_qty = max(1, int(editable.loc[i, "suggested_qty"]))   # never below 1
         editable.loc[i, "transfer_qty"] = col2.number_input(
             "Qty",
             min_value=1,
-            max_value=int(editable.loc[i, "available_qty"]),
-            value=int(editable.loc[i, "suggested_qty"]),
+            max_value=avail_qty,
+            value=min(sugg_qty, avail_qty),
             key=f"qty_{i}",
         )
         editable.loc[i, "locid"] = col3.text_input(
