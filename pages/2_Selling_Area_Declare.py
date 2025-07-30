@@ -86,6 +86,16 @@ st.markdown("""
 .cat-sect {color:#098A23;font-weight:bold;}
 .cat-family {color:#FF8800;font-weight:bold;}
 .cat-val {color:#111;}
+.scan-hint {
+    font-size: 1.28em;
+    color: #087911;
+    font-weight: 600;
+    background: #eafdff;
+    padding: .14em .7em .13em .7em;
+    border-radius: .45em;
+    margin: .2em 0 .5em 0;
+    text-align:center;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -161,7 +171,12 @@ def reset_camera_scan():
 with tab1:
     barcode = ""
     if QR_AVAILABLE:
-        barcode = qrcode_scanner(key="barcode_cam") or ""
+        st.markdown("<div class='scan-hint'>Aim the barcode at your phone or webcam for instant detection.<br>Hold steady and close to the lens.</div>", unsafe_allow_html=True)
+        barcode = qrcode_scanner(
+            key="barcode_cam",
+            min_confidence=0.45,  # more sensitive
+            box_color="#3ee22a"   # green box for positive scan
+        ) or ""
         if barcode:
             st.success(f"Scanned: {barcode}")
         declare_logic(barcode, reset_camera_scan)
