@@ -6,10 +6,10 @@ from db_handler import DatabaseManager
 
 # ────────────────────── DB helper ────────────────────────────────────
 class BarcodeShelfHandler(DatabaseManager):
-    def get_all_shelf_items(self):
-        """Show all items on shelf with their total quantity and threshold."""
+    def get_all_shelf_items(self, limit=20):
+        """Show up to `limit` items on shelf with their total quantity and threshold, ordered by lowest stock."""
         return self.fetch_data(
-            """
+            f"""
             SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode,
                    COALESCE(s.totalquantity, 0) AS shelfqty, i.shelfthreshold
             FROM item i
@@ -19,6 +19,7 @@ class BarcodeShelfHandler(DatabaseManager):
                 GROUP BY itemid
             ) s ON i.itemid = s.itemid
             ORDER BY shelfqty ASC
+            LIMIT {limit}
             """
         )
 
@@ -59,9 +60,9 @@ handler = BarcodeShelfHandler()
 def transfer_tab():
     st.subheader("📤 Auto Transfer: 10 Lowest Stock Items (Threshold < 10)")
 
-    # Always show a table of all shelf quantities and thresholds for inspection:
-    all_items = handler.get_all_shelf_items()
-    st.markdown("#### 🗃️ All Shelf Items (sorted by quantity)")
+    # Always show a table of 20 lowest shelf quantities and thresholds for inspection:
+    all_items = handler.get_all_shelf_items(limit=20)
+    st.markdown("#### 🗃️ 20 Shelf Items with Lowest Quantity (sorted by quantity)")
     st.dataframe(
         all_items[["itemname", "shelfqty", "shelfthreshold"]],
         use_container_width=True,
@@ -79,10 +80,8 @@ def transfer_tab():
     )
 
     if low_items.empty:
-        st.success("✅ No items are currently below threshold 10. (See above for full list.)")
+        st.success("✅ No items are currently below threshold 10. (See above for lowest 20 items.)")
         return
-
-    # --- (continue as before) ---
 
     st.info("🔻 The following items are below threshold and ready for transfer:")
     st.dataframe(
