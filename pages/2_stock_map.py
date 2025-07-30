@@ -83,7 +83,7 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (Default qty = shelfaverage minus shelfqty)")
+st.title("📤 Low-Stock Items Map (Default qty = shelfaverage - shelfqty, up to available)")
 
 low_items = handler.get_low_stock_items()
 if low_items.empty:
@@ -108,15 +108,15 @@ for r in low_items.itertuples():
     if not layer: continue
     locid = layer.get("locid","")
     avail = int(layer["quantity"])
-    # Calculate suggested quantity robustly
+    # Robustly calculate the suggested qty: shelfaverage - shelfqty, at least 1, up to avail
     try:
         shelfavg = float(getattr(r,"shelfaverage",0) or 0)
         shelfqty = int(r.shelfqty)
-        needed = shelfavg - shelfqty
-        sugg = int(needed) if needed > 0 else 1
+        needed = int(shelfavg - shelfqty)
+        sugg = needed if needed > 0 else 1
     except Exception:
         sugg = 1
-    sugg = min(max(sugg, 1), avail)
+    sugg = min(sugg, avail) if avail >= 1 else 1
     qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
     c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
     c1.markdown(f"<div class='item-card'><b>{r.itemname}</b><br>"
