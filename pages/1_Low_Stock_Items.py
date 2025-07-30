@@ -22,14 +22,8 @@ try:
         st.success("✅ No items are below the global threshold.")
     else:
         st.warning("⚠️ Items below global threshold in selling area:")
-        # Show location column
-        show_cols = [col for col in low_stock_df.columns if col in [
-            "itemname", "locid", "totalquantity", "shelfthreshold", "shelfaverage"
-        ]]
-        if not show_cols:
-            show_cols = low_stock_df.columns  # fallback to all
         st.dataframe(
-            low_stock_df[show_cols],
+            low_stock_df,
             use_container_width=True,
             hide_index=True,
         )
@@ -56,15 +50,18 @@ try:
                 ),
                 axis=1,
             )
-            # Show location column
-            show_cols = [col for col in alerts_df.columns if col in [
-                "itemname", "locid", "totalquantity", "shelfthreshold", "shelfaverage", "needed_for_average"
-            ]]
-            if not show_cols:
-                show_cols = alerts_df.columns  # fallback to all
+
             st.warning("⚠️ Items below individual shelf thresholds:")
             st.dataframe(
-                alerts_df[show_cols],
+                alerts_df[
+                    [
+                        "itemname",
+                        "totalquantity",
+                        "shelfthreshold",
+                        "shelfaverage",
+                        "needed_for_average",
+                    ]
+                ],
                 use_container_width=True,
                 hide_index=True,
             )
@@ -74,8 +71,7 @@ try:
                 "- **totalquantity**: current shelf quantity\n"
                 "- **shelfthreshold**: minimum required\n"
                 "- **shelfaverage**: desired shelf quantity\n"
-                "- **needed_for_average**: quantity needed to reach average\n"
-                "- **locid**: shelf/location identifier"
+                "- **needed_for_average**: quantity needed to reach average"
             )
 
 except Exception as e:
