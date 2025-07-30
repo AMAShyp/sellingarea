@@ -1,12 +1,12 @@
 import streamlit as st
 from db_handler import DatabaseManager
 
-# ───── Handler ─────
+# ───── Database Handler ─────
 class BarcodeShelfHandler(DatabaseManager):
     def get_low_stock_items(self, threshold=10, limit=10):
         return self.fetch_data(
             """
-            SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode,
+            SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode, 
                    s.totalquantity AS shelfqty, i.shelfthreshold
             FROM item i
             JOIN (
@@ -35,28 +35,23 @@ class BarcodeShelfHandler(DatabaseManager):
         return df.iloc[0].to_dict() if not df.empty else {}
 
     def move_layer(self, *, itemid, expiration, qty, cost, locid, by):
-        # decrement inventory
         self.execute_command(
             """
             UPDATE inventory
-            SET    quantity = quantity - %s
-            WHERE  itemid=%s AND expirationdate=%s AND cost_per_unit=%s
-              AND  quantity >= %s
+            SET quantity = quantity - %s
+            WHERE itemid=%s AND expirationdate=%s AND cost_per_unit=%s AND quantity >= %s
             """,
             (qty, itemid, expiration, cost, qty),
         )
-        # add to shelf
         self.execute_command(
             """
             INSERT INTO shelf (itemid, expirationdate, quantity, cost_per_unit, locid)
             VALUES (%s,%s,%s,%s,%s)
             ON CONFLICT (itemid, expirationdate, cost_per_unit, locid)
-            DO UPDATE SET quantity    = shelf.quantity + EXCLUDED.quantity,
-                          lastupdated = CURRENT_TIMESTAMP
+            DO UPDATE SET quantity = shelf.quantity + EXCLUDED.quantity, lastupdated = CURRENT_TIMESTAMP
             """,
             (itemid, expiration, qty, cost, locid),
         )
-        # log entry
         self.execute_command(
             """
             INSERT INTO shelfentries (itemid, expirationdate, quantity, createdby, locid)
@@ -65,119 +60,93 @@ class BarcodeShelfHandler(DatabaseManager):
             (itemid, expiration, qty, by, locid),
         )
 
-# ───── CSS Styling ─────
-st.markdown("""
-<style>
-.card-container {
-    background: #fefefe;
-    border: 1px solid #e0ecec;
-    border-radius: 1rem;
-    padding: 1.5rem;
-    margin-bottom: 1.5rem;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.05);
-}
-.refill-btn button {
-    width: 100%;
-    padding: 0.6em 0;
-    font-size: 1.05rem;
-    font-weight: 600;
-    border-radius: 0.5rem;
-    background: linear-gradient(90deg, #1ABC9C, #3EE2B4);
-    color: white;
-    border: none;
-}
-.barcode-box input, .quantity-box input {
-    width: 100%;
-    padding: 0.4em 0.8em;
-    font-size: 1rem;
-    border: 1px solid #d5dbe2;
-    border-radius: 0.5rem;
-    background: #fafafa;
-}
-.confirmed { color: #008c4a; font-weight: 600; }
-.not-matched { color: #e74c3c; font-weight: 600; }
-</style>
-""", unsafe_allow_html=True)
-
-# ───── Page ─────
+# ───── Streamlit Page ─────
 handler = BarcodeShelfHandler()
-st.subheader("📤 Auto Transfer: Low Stock Items (Barcode Confirmation)")
+
+st.set_page_config(layout="wide")
+st.title("📤 Auto Refill: Low-Stock Items")
 
 low_items = handler.get_low_stock_items(threshold=10, limit=10)
 if low_items.empty:
-    st.success("✅ No items at or below threshold 10.")
+    st.success("✅ All items are sufficiently stocked.")
     st.stop()
 
-for _, row in low_items.iterrows():
-    expiry = handler.get_first_expiry_for_item(row["itemid"])
-    if not expiry:
-        st.error(f"No shelf layer for {row['itemname']}.")
+# Inject some clean CSS for cards and layout
+st.markdown("""
+<style>
+.item-card {
+    padding: 0.7rem 1rem;
+    border-radius: 0.8rem;
+    box-shadow: 0 3px 6px rgba(0,0,0,0.05);
+    background-color: #ffffff;
+    margin-bottom: 0.8rem;
+    border: 1px solid #dde3e9;
+}
+.success-text { color: green; font-weight: bold; }
+.error-text { color: red; font-weight: bold; }
+.refill-btn button {
+    background-color: #16a085 !important;
+    color: white !important;
+    font-weight: bold;
+    border-radius: 0.5rem !important;
+    padding: 0.4rem 1.2rem !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+for idx, row in low_items.iterrows():
+    expiry_layer = handler.get_first_expiry_for_item(row["itemid"])
+    if not expiry_layer:
+        st.error(f"❌ Inventory data missing for {row['itemname']}.")
         continue
 
-    # prepare values
     shelfqty = int(row["shelfqty"])
-    threshold = int(row["shelfthreshold"])
-    needed = max(1, threshold - shelfqty)
-    avail = max(1, int(expiry["quantity"]))
-    default_qty = min(needed, avail)
+    shelfthreshold = int(row["shelfthreshold"])
+    to_transfer = max(1, shelfthreshold - shelfqty)
+    avail_qty = int(expiry_layer["quantity"])
+    suggested_qty = min(to_transfer, avail_qty)
 
-    # card container
+    qty_key = f"qty_{row['itemid']}"
+    barcode_key = f"barcode_{row['itemid']}"
+    button_key = f"refill_{row['itemid']}"
+
     with st.container():
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        cols = st.columns([4, 1.2, 2, 1], gap="medium")
 
-        # Info row
-        info_cols = st.columns([3,2,2])
-        info_cols[0].markdown(f"**🛒 {row['itemname']}**  \nBarcode: `{row['barcode']}`")
-        info_cols[1].markdown(f"📦 Shelf: **{shelfqty}** / 🚦 Threshold: **{threshold}**")
-        info_cols[2].markdown(f"📍 Location: `{expiry.get('locid','')}`")
+        # Item card details
+        cols[0].markdown(f"""
+        <div class='item-card'>
+            <b>{row['itemname']}</b><br>
+            📦 Shelf: {shelfqty}/{shelfthreshold} &nbsp; | &nbsp; 🗺️ Loc: {expiry_layer.get('locid','')}<br>
+            🔖 Barcode: <span style='font-family:monospace;'>{row['barcode']}</span>
+        </div>
+        """, unsafe_allow_html=True)
 
-        st.markdown("<br>", unsafe_allow_html=True)
+        # Quantity selection
+        qty = cols[1].number_input("Qty", 1, avail_qty, suggested_qty, key=qty_key)
 
-        # Controls row: qty, barcode, refill
-        ctrl_cols = st.columns([2,3,2])
-        with st.container():
-            with st.column(0):
-                st.markdown("<div class='quantity-box'><b>Qty to refill:</b></div>", unsafe_allow_html=True)
-                qty = ctrl_cols[0].number_input(
-                    "",
-                    min_value=1,
-                    max_value=avail,
-                    value=default_qty,
-                    key=f"qty_{row['itemid']}",
-                    label_visibility="collapsed",
-                )
-            with st.column(1):
-                st.markdown("<div class='barcode-box'><b>Confirm Barcode:</b></div>", unsafe_allow_html=True)
-                bc = ctrl_cols[1].text_input(
-                    "",
-                    placeholder="Scan here...",
-                    key=f"bc_{row['itemid']}",
-                    label_visibility="collapsed",
-                )
-            with st.column(2):
-                disabled = bc.strip() != str(row["barcode"])
-                refill_clicked = ctrl_cols[2].button(
-                    "🚚 Refill",
-                    key=f"refill_{row['itemid']}",
-                    disabled=disabled,
-                )
-        # feedback
-        if bc:
-            msg = "<div class='confirmed'>✅ Barcode OK</div>" if not disabled else "<div class='not-matched'>❌ Barcode mismatch</div>"
-            st.markdown(msg, unsafe_allow_html=True)
+        # Barcode input
+        barcode_input = cols[2].text_input("🔍 Barcode", key=barcode_key, placeholder="Scan barcode...")
 
-        # action
+        barcode_correct = barcode_input.strip() == row["barcode"]
+        if barcode_input:
+            if barcode_correct:
+                cols[2].markdown("<div class='success-text'>✅ Barcode matched!</div>", unsafe_allow_html=True)
+            else:
+                cols[2].markdown("<div class='error-text'>❌ Barcode incorrect!</div>", unsafe_allow_html=True)
+
+        # Refill button
+        refill_clicked = cols[3].button("🚚 Refill", key=button_key, disabled=not barcode_correct)
+
         if refill_clicked:
             user = st.session_state.get("user_email", "AutoTransfer")
             handler.move_layer(
                 itemid=row["itemid"],
-                expiration=expiry["expirationdate"],
+                expiration=expiry_layer["expirationdate"],
                 qty=int(qty),
-                cost=expiry["cost_per_unit"],
-                locid=expiry.get("locid",""),
+                cost=expiry_layer["cost_per_unit"],
+                locid=expiry_layer.get("locid", ""),
                 by=user,
             )
-            st.success(f"✅ {row['itemname']} refilled {qty} units to {expiry.get('locid','')}!")
+            st.success(f"✅ {row['itemname']} refilled ({qty} units to {expiry_layer.get('locid','')})!")
             st.rerun()
-
-        st.markdown("</div>", unsafe_allow_html=True)
