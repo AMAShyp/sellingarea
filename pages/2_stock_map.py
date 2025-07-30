@@ -83,7 +83,7 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (Default qty = shelfaverage - shelfqty, up to inventory)")
+st.title("📤 Low-Stock Items Map (Default qty = shelfaverage - shelfqty, up to available)")
 
 low_items = handler.get_low_stock_items()
 if low_items.empty:
@@ -108,25 +108,21 @@ for r in low_items.itertuples():
     if not layer: continue
     locid = layer.get("locid","")
     avail = int(layer["quantity"])
+    # Robustly calculate the suggested qty: shelfaverage - shelfqty, at least 1, up to avail
     try:
         shelfavg = float(getattr(r,"shelfaverage",0) or 0)
         shelfqty = int(r.shelfqty)
-        needed = int(round(shelfavg - shelfqty))
-        # Suggested: at least 1, at most inventory available, and at most needed (if needed>0)
+        needed = int(shelfavg - shelfqty)
         sugg = needed if needed > 0 else 1
-        max_qty = min(avail, needed) if needed > 0 else avail
-        # If available inventory is more than needed, user can only pick up to needed
-        # If inventory is less than needed, user can only pick up to avail
-        max_qty = max(max_qty, 1)  # Never below 1
     except Exception:
         sugg = 1
-        max_qty = avail if avail >= 1 else 1
+    sugg = min(sugg, avail) if avail >= 1 else 1
     qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
     c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
     c1.markdown(f"<div class='item-card'><b>{r.itemname}</b><br>"
                 f"📦 {r.shelfqty}/{r.shelfthreshold} (avg: {getattr(r,'shelfaverage','-')} ) | 🗺️ {locid}<br>"
                 f"🔖 <span style='font-family:monospace'>{r.barcode}</span></div>",unsafe_allow_html=True)
-    qty = c2.number_input("",1,max_qty,sugg,key=qk,label_visibility="collapsed")
+    qty = c2.number_input("",1,avail,sugg,key=qk,label_visibility="collapsed")
     bc  = c3.text_input("",key=bck,placeholder="scan",label_visibility="collapsed")
     ok  = bc.strip()==r.barcode
     if bc: c3.markdown(f"<span class='{ 'good' if ok else 'bad'}'>{'✅' if ok else '❌'}</span>",unsafe_allow_html=True)
@@ -136,4 +132,3 @@ for r in low_items.itertuples():
                            qty=int(qty),cost=layer["cost_per_unit"],locid=locid,
                            by=st.session_state.get("user_email","AutoTransfer"))
         st.success(f"✅ {r.itemname} → {qty} to {locid}"); st.rerun()
-
