@@ -91,13 +91,15 @@ for idx, row in low_items.iterrows():
         col0.error("No inventory layer found!")
         continue
 
+    shelfthreshold = int(row["shelfthreshold"])
+    shelfqty = int(row["shelfqty"])
+    to_transfer = shelfthreshold - shelfqty
     avail_qty = max(1, int(expiry_layer["quantity"]))
-    to_transfer = row["shelfthreshold"] - row["shelfqty"]
     sugg_qty = max(1, min(to_transfer, avail_qty))
 
     col0.markdown(f"**{row['itemname']}**")
     col0.markdown(f"Barcode: `{row['barcode']}`")
-    col1.markdown(f"Shelf Qty: `{row['shelfqty']}` / Threshold: `{row['shelfthreshold']}`")
+    col1.markdown(f"Shelf Qty: `{shelfqty}` / Threshold: `{shelfthreshold}`")
     col2.markdown(f"Location: `{expiry_layer.get('locid','')}`")
     qty = col3.number_input(
         "Qty",
@@ -118,4 +120,4 @@ for idx, row in low_items.iterrows():
             by=user,
         )
         st.success(f"✅ {row['itemname']} refilled with {qty} units to {expiry_layer.get('locid','')}!")
-        st.experimental_rerun()
+        st.rerun()
