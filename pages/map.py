@@ -1,280 +1,191 @@
-# shelf_map/map.py
-import math, time, logging, inspect
 import streamlit as st
-import plotly.graph_objects as go
-from PIL import Image
+from db_handler import DatabaseManager
 
-from shelf_map.shelf_map_handler import ShelfMapHandler
-from shelf_map.shelf_map_utils   import shelf_selector, item_locator
-
-# ────────────────────────────────────────────────────────── helpers
-log  = logging.getLogger("shelfmap"); log.setLevel(logging.INFO)
-ping = lambda m,t0: st.write(f"⌛ {m} in {time.time()-t0:.2f}s")
-
-handler = ShelfMapHandler()
-
-# Show Plotly events for debugging when True
-DEBUG_EVENTS = False
-
-# compute the aspect ratio of the background image once so that
-# overlays align perfectly with the picture.  We parse the PNG header
-# directly to avoid depending on Pillow being available during tests.
-def _img_ratio(path: str = "assets/shelf_map.png") -> float:
-    """Return image height / width for the given PNG file."""
-    try:
-        with open(path, "rb") as f:
-            f.seek(16)
-            width = int.from_bytes(f.read(4), "big")
-            height = int.from_bytes(f.read(4), "big")
-        return height / width
-    except Exception:
-        return 1.0
-
-PNG_RATIO = _img_ratio()
-
-@st.cache_data(ttl=3600)
-def load_locations():
-    return handler.get_locations()        # all shelves
-
-@st.cache_resource
-def load_bg():
-    return Image.open("assets/shelf_map.png")     # if you still want PNG
-
-def _to_float(val):
-    """Best-effort conversion of `val` to float without triggering Streamlit
-    callbacks."""
-    if val is None:
-        return None
-    try:
-        return float(val)
-    except Exception:
-        pass
-    if callable(val):
-        try:
-            return float(val())
-        except Exception:
-            pass
-    return None
-
-
-def inside(px: float, py: float, row: dict) -> bool:
-    """Point-in-rotated-rectangle test in 0-1 data space."""
-    w = float(row["w_pct"])
-    h = float(row["h_pct"])
-    cx = float(row["x_pct"]) + w / 2
-    cy = 1 - (float(row["y_pct"]) + h / 2)  # flip Y once
-
-    px = _to_float(px)
-    py = _to_float(py)
-    if px is None or py is None:
-        return False
-    dx, dy = px - cx, py - cy
-
-    deg = float(row.get("rotation_deg") or 0.0)
-    if deg:
-        rad = -math.radians(deg)
-        cos, sin = math.cos(rad), math.sin(rad)
-        dx, dy = dx * cos - dy * sin, dx * sin + dy * cos
-
-    return abs(dx) <= w/2 and abs(dy) <= h/2
-
-# ────────────────────────────────────────────────────────── main page
-def map_tab():
-    """Interactive shelf map with click and search capabilities."""
-    t0 = time.time()
-
-    show_png = st.checkbox("Show floor-plan image", value=False)
-
-    locs  = load_locations()
-    img   = load_bg() if show_png else None
-
-    col_shelf, col_name, col_barcode = st.columns(3)
-    with col_shelf:
-        dropdown = shelf_selector(locs)
-
-    item_loc, item_id, searched = item_locator(handler, col_name, col_barcode)
-
-    highlight = st.session_state.get("shelfmap_highlight")
-    if isinstance(highlight, str):
-        highlight = [highlight]
-
-    not_found = False
-
-    if item_loc:
-        new = item_loc if isinstance(item_loc, list) else [item_loc]
-        if new != highlight:
-            highlight = new
-            st.session_state["shelfmap_highlight"] = highlight
-    elif searched:
-        highlight = None
-        st.session_state.pop("shelfmap_highlight", None)
-        not_found = True
-    elif dropdown and highlight != [dropdown]:
-        highlight = [dropdown]
-        st.session_state["shelfmap_highlight"] = highlight
-
-    title_hi = ", ".join(highlight) if isinstance(highlight, list) else highlight
-    msg = "This item is not available in shelves" if not_found else f"Highlight: {title_hi}"
-    ping(msg, t0)
-
-    # ───── draw rectangles & halo ───────────────────────────────────
-    shapes = []
-    for row in locs:
-        x = float(row["x_pct"])
-        y = float(row["y_pct"])
-        w = float(row["w_pct"])
-        h = float(row["h_pct"])
-        deg = float(row.get("rotation_deg") or 0.0)
-
-        cx = x + w/2
-        cy = 1 - (y + h/2)
-
-        y = 1 - y - h                       # flip Y once for drawing
-        is_hi = highlight and row["locid"] in highlight
-        fill  = "rgba(26,188,156,0.15)" if not is_hi else "rgba(255,128,0,0.25)"
-        line  = dict(width=2 if is_hi else 1,
-                     color="#FF8000" if is_hi else "#1ABC9C")
-
-        if deg == 0:
-            shapes.append(dict(type="rect", x0=x, y0=y, x1=x+w, y1=y+h,
-                               line=line, fillcolor=fill))
-        else:
-            rad = math.radians(deg)
-            cos, sin = math.cos(rad), math.sin(rad)
-            pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
-            path = "M " + " L ".join(
-                f"{cx+u*cos-v*sin},{cy+u*sin+v*cos}" for u, v in pts) + " Z"
-            shapes.append(dict(type="path", path=path,
-                               line=line, fillcolor=fill))
-
-        if is_hi:                          # orange halo
-            r = max(w, h) * 0.65
-            shapes.append(dict(type="circle", xref="x", yref="y",
-                               x0=cx - r, x1=cx + r, y0=cy - r, y1=cy + r,
-                               line=dict(color="#FF8000", width=2, dash="dot")))
-
-    # ───── Plotly figure ────────────────────────────────────────────
-    fig = go.Figure()
-    if img is not None:
-        fig.add_layout_image(dict(
-            source=img, xref="x", yref="y",
-            x=0, y=1, sizex=1, sizey=1,
-            xanchor="left", yanchor="top", layer="below"))
-
-    fig.update_layout(shapes=shapes, height=700,
-                      margin=dict(l=0,r=0,t=0,b=0))
-    fig.update_xaxes(visible=False, range=[0,1], constrain="domain")
-    # Maintain the original aspect ratio of the floor-plan image so that
-    # drawn rectangles match the picture regardless of zoom level.
-    fig.update_yaxes(visible=False, range=[0,1],
-                     scaleanchor="x", scaleratio=PNG_RATIO)
-
-    # cover-trace to capture click positions reliably. `st.plotly_chart`
-    # reports the coordinates of the clicked data point, so a single
-    # invisible marker at `(0, 0)` would cause every click to report
-    # `(0, 0)`.  Instead we add a grid of invisible points covering the
-    # whole [0, 1] range so that a nearby point is always selected and the
-    # event returns the proper coordinates.
-    step      = 0.01
-    grid      = [i * step for i in range(int(1 / step) + 1)]
-    cover_x   = []
-    cover_y   = []
-    for x in grid:
-        cover_x.extend([x] * len(grid))
-        cover_y.extend(grid)
-    fig.add_trace(go.Scatter(
-        x=cover_x, y=cover_y, mode="markers",
-        marker=dict(size=1, opacity=0),
-        hoverinfo="none", showlegend=False))
-
-    # Pass the figure as a positional argument so that both the old
-    # ``figure_or_data`` and the newer ``fig`` parameter names are
-    # supported.  Additional parameters are provided via ``kwargs`` to
-    # remain compatible with multiple Streamlit versions.
-    kwargs = dict(key="shelfmap", height=700)
-    sig = inspect.signature(st.plotly_chart)
-    if "on_click" in sig.parameters:
-        kwargs["on_click"] = "rerun"
-    if "on_select" in sig.parameters:
-        kwargs["on_select"] = "rerun"
-        kwargs["selection_mode"] = "points"
-
-    event_dict = st.plotly_chart(fig, **kwargs)
-
-    # ───── click handling ──────────────────────────────────────────
-    pt = None
-    if event_dict:
-        points = None
-        if hasattr(event_dict, "points"):
-            points = event_dict.points
-        elif isinstance(event_dict, dict):
-            points = event_dict.get("points")
-        if not points:
-            selection = None
-            if hasattr(event_dict, "selection"):
-                selection = event_dict.selection
-                if hasattr(selection, "points"):
-                    points = selection.points
-            elif isinstance(event_dict, dict):
-                selection = event_dict.get("selection")
-                if isinstance(selection, dict):
-                    points = selection.get("points")
-        if callable(points):
-            try:
-                points = points()
-            except Exception:
-                points = None
-        if points:
-            if not isinstance(points, list):
-                points = [points]
-            pt = points[0]
-        else:
-            x = getattr(event_dict, "x", None)
-            y = getattr(event_dict, "y", None)
-            if isinstance(event_dict, dict):
-                x = event_dict.get("x", x)
-                y = event_dict.get("y", y)
-            if x is not None and y is not None:
-                pt = {"x": x, "y": y}
-
-    if pt is not None:
-        px = pt["x"] if isinstance(pt, dict) else getattr(pt, "x", None)
-        py = pt["y"] if isinstance(pt, dict) else getattr(pt, "y", None)
-        if px is None or py is None:
-            pass
-        else:
-            hit = next((r for r in locs if inside(px, py, r)), None)
-            if hit:
-                locid = hit["locid"]
-                current = st.session_state.get("shelfmap_highlight")
-                if isinstance(current, str):
-                    current = [current]
-                if current != [locid]:
-                    st.session_state["shelfmap_highlight"] = [locid]
-                    # Clear item search inputs so that clicking on the map does
-                    # not keep re-triggering the previous item lookup.
-                    st.session_state.pop("item_name_selector", None)
-                    st.session_state.pop("item_barcode_input", None)
-                    st.rerun()
-        # click in aisle ⇒ ignore
-
-    # ───── stock panel ─────────────────────────────────────────────
-    if highlight:
-        title = ", ".join(highlight) if isinstance(highlight, list) else str(highlight)
-        st.subheader(f"📍 {title}")
-        if isinstance(highlight, list) and len(highlight) == 1:
-            shelf = highlight[0]
-            stock = handler.get_stock_by_location(shelf)
-            st.dataframe(
-                stock if not stock.empty else {"info": ["No items on this shelf"]},
-                use_container_width=True)
-
-    # ───── item availability table ───────────────────────────────────
-    if item_id:
-        item_stock = handler.get_stock_for_item(item_id)
-        st.markdown("---")
-        st.subheader("📝 Item Availability")
-        st.dataframe(
-            item_stock if not item_stock.empty else {"info": ["Item not on shelf"]},
-            use_container_width=True,
+# ───── Database Handler ─────
+class BarcodeShelfHandler(DatabaseManager):
+    def get_low_stock_items(self, threshold=10, limit=10):
+        return self.fetch_data(
+            """
+            SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode, 
+                   s.totalquantity AS shelfqty, i.shelfthreshold
+            FROM item i
+            JOIN (
+                SELECT itemid, SUM(quantity) AS totalquantity
+                FROM shelf
+                GROUP BY itemid
+            ) s ON i.itemid = s.itemid
+            WHERE s.totalquantity <= COALESCE(i.shelfthreshold, %s)
+            ORDER BY s.totalquantity ASC
+            LIMIT %s
+            """,
+            (threshold, limit),
         )
+    def get_first_expiry_for_item(self, itemid):
+        df = self.fetch_data(
+            """
+            SELECT expirationdate, quantity, cost_per_unit, locid
+            FROM shelf
+            WHERE itemid = %s AND quantity > 0
+            ORDER BY expirationdate ASC, cost_per_unit ASC
+            LIMIT 1
+            """,
+            (itemid,),
+        )
+        return df.iloc[0].to_dict() if not df.empty else {}
+
+    def move_layer(self, *, itemid, expiration, qty, cost, locid, by):
+        self.execute_command(
+            """
+            UPDATE inventory
+            SET quantity = quantity - %s
+            WHERE itemid=%s AND expirationdate=%s AND cost_per_unit=%s AND quantity >= %s
+            """,
+            (qty, itemid, expiration, cost, qty),
+        )
+        self.execute_command(
+            """
+            INSERT INTO shelf (itemid, expirationdate, quantity, cost_per_unit, locid)
+            VALUES (%s,%s,%s,%s,%s)
+            ON CONFLICT (itemid, expirationdate, cost_per_unit, locid)
+            DO UPDATE SET quantity = shelf.quantity + EXCLUDED.quantity, lastupdated = CURRENT_TIMESTAMP
+            """,
+            (itemid, expiration, qty, cost, locid),
+        )
+        self.execute_command(
+            """
+            INSERT INTO shelfentries (itemid, expirationdate, quantity, createdby, locid)
+            VALUES (%s,%s,%s,%s,%s)
+            """,
+            (itemid, expiration, qty, by, locid),
+        )
+
+# ───── Streamlit Page ─────
+handler = BarcodeShelfHandler()
+st.set_page_config(layout="wide")
+st.title("📤 Auto Refill: Low Stock Items")
+
+low_items = handler.get_low_stock_items(threshold=10, limit=10)
+if low_items.empty:
+    st.success("✅ All items are sufficiently stocked.")
+    st.stop()
+
+# Compact card-row CSS for clarity and spacing
+st.markdown("""
+<style>
+.compact-row {
+    display: flex;
+    align-items: center;
+    background: #f9f9fc;
+    border-radius: 0.9em;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+    border: 1.5px solid #E0ECEC;
+    margin-bottom: 1.1em;
+    padding: 0.7em 1.1em 0.7em 1.1em;
+}
+.compact-row .col {
+    margin-right: 2em;
+}
+.compact-row .barcode-box input {
+    font-size: 1.1em !important;
+    padding: 0.4em 0.8em !important;
+    border-radius: 0.7em !important;
+    border: 1.5px solid #d5dbe2 !important;
+    background: #fbfbfb !important;
+}
+.compact-row .qty-box input {
+    font-size: 1.09em !important;
+    font-weight: 600 !important;
+    border-radius: 0.7em !important;
+    padding: 0.33em 1em !important;
+}
+.confirmed-barcode { color: #008c4a; font-weight: bold;}
+.not-matched-barcode { color: #e74c3c; font-weight: bold;}
+.refill-btn button {
+    font-size: 1.09em !important;
+    font-weight: bold !important;
+    border-radius: 0.7em !important;
+    padding: 0.37em 1.8em !important;
+    background: linear-gradient(92deg, #1ABC9C 70%, #52ffe2 100%) !important;
+    color: white !important;
+    border: none !important;
+    margin-top: 0.2em;
+}
+</style>
+""", unsafe_allow_html=True)
+
+for idx, row in low_items.iterrows():
+    expiry_layer = handler.get_first_expiry_for_item(row["itemid"])
+    if not expiry_layer:
+        st.error(f"❌ No shelf/loc found for {row['itemname']}.")
+        continue
+
+    shelfqty = int(row["shelfqty"])
+    shelfthreshold = int(row["shelfthreshold"])
+    to_transfer = max(1, shelfthreshold - shelfqty)
+    avail_qty = int(expiry_layer["quantity"])
+    suggested_qty = min(to_transfer, avail_qty)
+
+    qty_key = f"qty_{row['itemid']}"
+    barcode_key = f"barcode_{row['itemid']}"
+    button_key = f"refill_{row['itemid']}"
+
+    with st.container():
+        st.markdown("<div class='compact-row'>", unsafe_allow_html=True)
+
+        # Info block
+        st.markdown(
+            f"""<div class='col' style="min-width:280px;">
+            <b>{row['itemname']}</b>
+            <br><span style='font-size:0.97em;'>Barcode: <span style="font-family:monospace">{row['barcode']}</span></span>
+            <br>Qty: <b>{shelfqty}</b> / {shelfthreshold}
+            <br>Loc: <span style="font-family:monospace">{expiry_layer.get('locid','')}</span>
+            </div>""", unsafe_allow_html=True
+        )
+
+        # Quantity box
+        qty = st.number_input(
+            "Qty", min_value=1, max_value=avail_qty,
+            value=suggested_qty, key=qty_key, label_visibility="collapsed"
+        )
+
+        # Barcode input
+        st.markdown("<div class='barcode-box col' style='min-width:150px;'>", unsafe_allow_html=True)
+        barcode_input = st.text_input(
+            "Barcode", value="", key=barcode_key, placeholder="Scan barcode...", label_visibility="collapsed"
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # Status message
+        barcode_correct = barcode_input.strip() == row["barcode"]
+        msg = ""
+        if barcode_input:
+            if barcode_correct:
+                msg = "<span class='confirmed-barcode'>✅ Barcode matched</span>"
+            else:
+                msg = "<span class='not-matched-barcode'>❌ Barcode incorrect</span>"
+        st.markdown(f"<div class='col' style='min-width:140px;'>{msg}</div>", unsafe_allow_html=True)
+
+        # Button
+        btn_col = st.columns([0.5,1,0.5])[1]
+        with btn_col:
+            refill_clicked = st.button(
+                "🚚 Refill",
+                key=button_key,
+                disabled=not barcode_correct,
+                help="Scan or enter the correct barcode to enable.",
+                type="primary",
+                use_container_width=True
+            )
+            if refill_clicked:
+                user = st.session_state.get("user_email", "AutoTransfer")
+                handler.move_layer(
+                    itemid=row["itemid"],
+                    expiration=expiry_layer["expirationdate"],
+                    qty=int(qty),
+                    cost=expiry_layer["cost_per_unit"],
+                    locid=expiry_layer.get("locid", ""),
+                    by=user,
+                )
+                st.success(f"✅ {row['itemname']} refilled ({qty} units to {expiry_layer.get('locid','')})!")
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
