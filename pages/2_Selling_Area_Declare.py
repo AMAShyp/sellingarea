@@ -1,6 +1,12 @@
 import streamlit as st
 from db_handler import DatabaseManager
 
+try:
+    from streamlit_qrcode_scanner import qrcode_scanner
+    QR_AVAILABLE = True
+except ImportError:
+    QR_AVAILABLE = False
+
 class DeclareHandler(DatabaseManager):
     def get_item_by_barcode(self, barcode):
         df = self.fetch_data("""
@@ -19,8 +25,7 @@ class DeclareHandler(DatabaseManager):
             WHERE itemid=%s
             GROUP BY locid
             ORDER BY locid
-        """, (int(itemid),))  # Always cast to int!
-
+        """, (int(itemid),))
         return df
 
     def get_inventory_total(self, itemid):
@@ -84,7 +89,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
+barcode = ""
+barcode_mode = st.radio("Choose barcode input method:", ["Type / Scan in input box", "Scan via phone camera"])
+
+if barcode_mode == "Type / Scan in input box":
+    barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
+elif QR_AVAILABLE:
+    scanned = qrcode_scanner(key="barcode_cam", label="Scan barcode using phone camera")
+    barcode = scanned or ""
+    if barcode:
+        st.success(f"Scanned: {barcode}")
+    else:
+        st.info("Open camera, show barcode in view.")
+
+else:
+    st.warning("Camera scanning component not installed. Please use the input box, or `pip install streamlit-qrcode-scanner`.")
+
 if not barcode:
     st.info("Please scan or enter the item barcode.")
     st.stop()
