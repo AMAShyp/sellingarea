@@ -7,9 +7,9 @@ class BarcodeShelfHandler(DatabaseManager):
     def get_low_stock_items(self, thr=10, limit=10):
         return self.fetch_data("""
             SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode,
-                   s.totalquantity AS shelfqty,              -- current on shelf
-                   i.shelfthreshold, i.shelfaverage,         -- from item table
-                   s2.locid, s2.quantity as shelf_current_qty -- shelf location and current qty for each item
+                   s.totalquantity AS shelfqty,              -- current on shelf (SUM of shelf.quantity)
+                   i.shelfthreshold, i.shelfaverage,
+                   s2.locid, s2.quantity as shelf_current_qty
             FROM item i
             JOIN (SELECT itemid, SUM(quantity) AS totalquantity FROM shelf GROUP BY itemid) s
                  ON i.itemid = s.itemid
@@ -25,6 +25,15 @@ class BarcodeShelfHandler(DatabaseManager):
             ORDER BY expirationdate,cost_per_unit LIMIT 1
         """, (itemid,))
         return df.iloc[0].to_dict() if not df.empty else {}
+
+    def get_available_inventory(self, itemid):
+        df = self.fetch_data("""
+            SELECT SUM(quantity) as available_qty
+            FROM inventory
+            WHERE itemid=%s AND quantity > 0
+        """, (itemid,))
+        # Return 0 if no rows, else available quantity as int
+        return int(df.iloc[0]['available_qty']) if not df.empty and df.iloc[0]['available_qty'] is not None else 0
 
     def move_layer(self, *, itemid, expiration, qty, cost, locid, by):
         self.execute_command("""
@@ -91,7 +100,7 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (Debug + Any Positive Refill)")
+st.title("📤 Low-Stock Items Map (Max refill = available in inventory)")
 
 low_items = handler.get_low_stock_items()
 if low_items.empty:
@@ -122,9 +131,11 @@ for r in low_items.itertuples():
     shelfthreshold = int(getattr(r, "shelfthreshold", 1))
     current_qty = int(getattr(r, "shelfqty", 0))
     shelf_current_qty = int(getattr(r, "shelf_current_qty", layer.get("quantity", 0)))
-    # Suggested is shelfaverage - current, but must allow any positive integer input
+    available_in_inventory = handler.get_available_inventory(r.itemid)
     suggested = int(shelfavg - current_qty) if shelfavg > current_qty else 1
     suggested = max(suggested, 1)
+    max_refill = max(available_in_inventory, 1)
+
     debug_text = (
         f"<div class='debugbox'><b>Debug Info:</b><br>"
         f"<b>itemid</b>: {r.itemid}<br>"
@@ -136,7 +147,10 @@ for r in low_items.itertuples():
         f" &nbsp; - <b>shelfaverage</b>: <code>{shelfavg}</code><br>"
         f" &nbsp; - <b>shelfthreshold</b>: <code>{shelfthreshold}</code><br>"
         f" &nbsp; - <b>barcode</b>: <code>{barcode}</code><br>"
-        f"<b>Suggested refill:</b> {suggested}<br>"
+        f" <b>From inventory table</b>:<br>"
+        f" &nbsp; - <b>available_in_inventory</b>: <code>{available_in_inventory}</code><br>"
+        f"<b>Suggested refill (prefill):</b> {suggested}<br>"
+        f"<b>Max allowed (inventory):</b> {max_refill}<br>"
         "</div>"
     )
     qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
@@ -146,7 +160,9 @@ for r in low_items.itertuples():
                 f"🔖 <span style='font-family:monospace'>{barcode}</span>"
                 f"{debug_text}</div>",unsafe_allow_html=True)
     qty = c2.number_input(
-        "", min_value=1, value=suggested, step=1, key=qk, label_visibility="collapsed"
+        "", min_value=1, max_value=max_refill,
+        value=suggested if suggested <= max_refill else max_refill, step=1,
+        key=qk, label_visibility="collapsed"
     )
     bc  = c3.text_input("",key=bck,placeholder="scan",label_visibility="collapsed")
     ok  = bc.strip()==barcode
