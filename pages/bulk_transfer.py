@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 import pandas as pd
 import streamlit as st
-from selling_area.transfer import BarcodeShelfHandler
+from pages.transfer import BarcodeShelfHandler
 
 # ───────────────────────── config ────────────────────────────────────
 KEY_PFX   = "bt_"
