@@ -27,7 +27,6 @@ class BarcodeShelfHandler(DatabaseManager):
         return df.iloc[0].to_dict() if not df.empty else {}
 
     def get_inventory_info(self, itemid):
-        # We show the inventory entry with the largest available quantity
         df = self.fetch_data("""
             SELECT quantity, storagelocation, expirationdate
             FROM inventory
@@ -127,7 +126,6 @@ st.markdown("""
 .good{color:green;font-weight:bold}.bad{color:#c00;font-weight:bold}
 .refill-btn button{background:#1abc9c!important;color:#fff!important;font-weight:bold;
                    border-radius:.45rem!important;padding:.15rem .57rem!important;margin-top:.03rem}
-.debugbox{background:#f6f7fa;color:#303040;padding:0.18em 0.8em 0.12em 0.8em;font-size:0.98em;margin-bottom:0.1em;border-radius:0.45em;border:1.5px dotted #b1c1d1}
 </style>""",unsafe_allow_html=True)
 
 for r in low_items.itertuples():
@@ -143,30 +141,9 @@ for r in low_items.itertuples():
     shelfavg = float(getattr(r, "shelfaverage", 0) or 0)
     shelfthreshold = int(getattr(r, "shelfthreshold", 1))
     current_qty = int(getattr(r, "shelfqty", 0))
-    shelf_current_qty = int(getattr(r, "shelf_current_qty", layer.get("quantity", 0)))
     suggested = int(shelfavg - current_qty) if shelfavg > current_qty else 1
     suggested = max(suggested, 1)
     max_refill = max(available_in_inventory, 1)
-
-    debug_text = (
-        f"<div class='debugbox'><b>Debug Info:</b><br>"
-        f"<b>itemid</b>: {r.itemid}<br>"
-        f"<b>From shelf table</b>:<br>"
-        f" &nbsp; - <b>locid</b>: <code>{locid}</code><br>"
-        f" &nbsp; - <b>current shelf qty</b>: <code>{shelf_current_qty}</code> (shelf.quantity, shelf_map_handler.get_first_layer)<br>"
-        f"<b>From item table</b>:<br>"
-        f" &nbsp; - <b>shelfqty</b>: <code>{current_qty}</code> (SUM(shelf.quantity))<br>"
-        f" &nbsp; - <b>shelfaverage</b>: <code>{shelfavg}</code><br>"
-        f" &nbsp; - <b>shelfthreshold</b>: <code>{shelfthreshold}</code><br>"
-        f" &nbsp; - <b>barcode</b>: <code>{barcode}</code><br>"
-        f"<b>From inventory table</b>:<br>"
-        f" &nbsp; - <b>available_in_inventory</b>: <code>{available_in_inventory}</code><br>"
-        f" &nbsp; - <b>storagelocation</b>: <code>{storagelocation}</code><br>"
-        f" &nbsp; - <b>expirationdate</b>: <code>{inv_expdate}</code><br>"
-        f"<b>Suggested refill (prefill):</b> {suggested}<br>"
-        f"<b>Max allowed (inventory):</b> {max_refill}<br>"
-        "</div>"
-    )
     qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
     c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
     c1.markdown(
@@ -174,8 +151,9 @@ for r in low_items.itertuples():
         f"📦 {current_qty} (avg: {shelfavg}, thr: {shelfthreshold}) | 🗺️ {locid}<br>"
         f"🔖 <span style='font-family:monospace'>{barcode}</span><br>"
         f"🏬 <b>Storage:</b> {storagelocation}<br>"
-        f"⏳ <b>Exp:</b> {inv_expdate}"
-        f"{debug_text}</div>", unsafe_allow_html=True)
+        f"⏳ <b>Exp:</b> {inv_expdate}<br>"
+        f"<b>Inventory available:</b> {available_in_inventory}"
+        f"</div>", unsafe_allow_html=True)
     qty = c2.number_input(
         "", min_value=1, max_value=max_refill,
         value=suggested if suggested <= max_refill else max_refill, step=1,
