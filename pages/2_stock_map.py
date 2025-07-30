@@ -7,20 +7,18 @@ class BarcodeShelfHandler(DatabaseManager):
     def get_low_stock_items(self, thr=10, limit=10):
         return self.fetch_data("""
             SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode,
-                   s.totalquantity AS shelfqty, i.shelfthreshold
+                   s.totalquantity AS shelfqty,i.shelfthreshold
             FROM item i
-            JOIN (SELECT itemid, SUM(quantity) AS totalquantity FROM shelf GROUP BY itemid) s
+            JOIN (SELECT itemid,SUM(quantity) AS totalquantity FROM shelf GROUP BY itemid) s
                  ON i.itemid=s.itemid
             WHERE s.totalquantity <= COALESCE(i.shelfthreshold,%s)
             ORDER BY s.totalquantity ASC LIMIT %s""",(thr,limit))
-
     def get_first_layer(self,itemid):
         df=self.fetch_data("""
             SELECT expirationdate,quantity,cost_per_unit,locid
             FROM shelf WHERE itemid=%s AND quantity>0
             ORDER BY expirationdate,cost_per_unit LIMIT 1""",(itemid,))
         return df.iloc[0].to_dict() if not df.empty else {}
-
     def move_layer(self,*,itemid,expiration,qty,cost,locid,by):
         self.execute_command("""
             UPDATE inventory SET quantity=quantity-%s
@@ -36,7 +34,6 @@ class BarcodeShelfHandler(DatabaseManager):
             INSERT INTO shelfentries(itemid,expirationdate,quantity,createdby,locid)
             VALUES (%s,%s,%s,%s,%s)""",(itemid,expiration,qty,by,locid))
 
-# ---- SHELF MAP PLOT (No PNG) ----
 def map_with_highlights(locs, highlight_locs):
     import math
     shapes = []
@@ -49,15 +46,13 @@ def map_with_highlights(locs, highlight_locs):
         fill = "rgba(220,53,69,0.34)" if is_hi else "rgba(180,180,180,0.11)"
         line = dict(width=2 if is_hi else 1.2, color="#d8000c" if is_hi else "#888")
         if deg == 0:
-            shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h,
-                               line=line, fillcolor=fill))
+            shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
         else:
             rad = math.radians(deg)
             cos, sin = math.cos(rad), math.sin(rad)
             pts = [(-w/2,-h/2),(w/2,-h/2),(w/2,h/2),(-w/2,h/2)]
             path = "M " + " L ".join(f"{cx+u*cos-v*sin},{cy+u*sin+v*cos}" for u,v in pts) + " Z"
             shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
-        # Optional: circle for red highlight
         if is_hi:
             r = max(w, h)*0.5
             shapes.append(dict(type="circle",xref="x",yref="y",
@@ -68,34 +63,30 @@ def map_with_highlights(locs, highlight_locs):
                       plot_bgcolor="#f8f9fa")
     fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
-    # Add shelf labels
+    # Only label shelves that are in highlight_locs
     for row in locs:
-        x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
-        fig.add_annotation(
-            x=x + w/2, y=1 - (y + h/2),
-            text=row.get("label",row["locid"]),
-            showarrow=False,
-            font=dict(size=10, color="#444"),
-            align="center",
-            bgcolor="rgba(255,255,255,0.6)",
-            bordercolor="#aaa",
-            borderpad=1,
-            opacity=0.82,
-        )
+        if row["locid"] in highlight_locs:
+            x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
+            fig.add_annotation(
+                x=x + w/2, y=1 - (y + h/2),
+                text=row.get("label",row["locid"]),
+                showarrow=False,
+                font=dict(size=11, color="#c90000", family="monospace"),
+                align="center",
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="#d8000c",
+                borderpad=2,
+                opacity=0.95,
+            )
     return fig
-
-# --------------- MAIN PAGE ---------------
 
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
-
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (No PNG Background)")
-
+st.title("📤 Low-Stock Items Map (Red labels only on shelves to refill)")
 low_items = handler.get_low_stock_items()
 if low_items.empty:
     st.success("✅ All items sufficiently stocked."); st.stop()
-
 locs = map_handler.get_locations()
 hi_locs = sorted({handler.get_first_layer(r.itemid).get("locid","") for r in low_items.itertuples() if handler.get_first_layer(r.itemid)})
 
