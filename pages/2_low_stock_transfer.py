@@ -62,59 +62,63 @@ class BarcodeShelfHandler(DatabaseManager):
             (itemid, expiration, qty, by, locid),
         )
 
-# ───── Page ─────
-handler = BarcodeShelfHandler()
-
+# --- Compact Card Style ---
 st.markdown("""
 <style>
-.card-container {
-    background: linear-gradient(92deg, #f9fafb 80%, #e8fffa 100%);
-    border-radius: 1.2rem;
-    border: 1.5px solid #E0ECEC;
-    box-shadow: 0 2px 8px rgba(44, 62, 80, 0.10);
-    padding: 1.5rem 2rem 1.3rem 2rem;
-    margin-bottom: 2.1rem;
+.compact-card {
+    border-radius: 1.1em;
+    background: linear-gradient(90deg, #e7fdf8 80%, #e3e8fa 100%);
+    border: 1.3px solid #E0ECEC;
+    box-shadow: 0 2px 6px rgba(44,62,80,.10);
+    margin-bottom: 0.6em;
+    padding: 1.1em 1.1em 0.9em 1.1em;
+    transition: box-shadow 0.2s;
+}
+.compact-card:hover {
+    box-shadow: 0 6px 22px 0 rgba(44,62,80,.16);
+    border-color: #17c7a6;
 }
 .refill-btn button {
-    font-size: 1.18rem !important;
+    font-size: 1.13rem !important;
     font-weight: 600 !important;
-    padding: 0.5em 2.2em !important;
-    border-radius: 0.8em !important;
+    border-radius: 0.9em !important;
     background: linear-gradient(92deg, #1ABC9C 60%, #3ee2b4 100%) !important;
     color: white !important;
-    border: none !important;
-    margin-top: 0.5em;
+    padding: 0.47em 1.7em !important;
+    margin-top: 0.1em;
 }
 .barcode-box input {
-    font-size: 1.14em !important;
+    font-size: 1.09em !important;
     padding: 0.4em 1em !important;
     border-radius: 0.7em !important;
-    border: 1.5px solid #d5dbe2 !important;
+    border: 1.4px solid #d5dbe2 !important;
     background: #fbfbfb !important;
 }
 .quantity-box input {
-    font-size: 1.1em !important;
+    font-size: 1.12em !important;
     font-weight: 600 !important;
-    border-radius: 0.6em !important;
-    padding: 0.3em 0.8em !important;
+    border-radius: 0.7em !important;
+    padding: 0.26em 0.8em !important;
 }
 .confirmed-barcode {
     color: #008c4a;
     font-weight: bold;
+    font-size: 1.08em;
 }
 .not-matched-barcode {
     color: #e74c3c;
     font-weight: bold;
+    font-size: 1.08em;
 }
-@media (max-width: 1000px) {
-    .card-container { padding: 1em 0.5em 1em 0.5em;}
+@media (max-width: 1100px) {
+    .compact-card { padding: 0.5em 0.4em 0.6em 0.5em;}
 }
 </style>
 """, unsafe_allow_html=True)
 
 st.subheader("📤 Auto Transfer: Low Stock Items (Barcode Confirmation Required)")
-st.markdown("<br>", unsafe_allow_html=True)
 
+handler = BarcodeShelfHandler()
 low_items = handler.get_low_stock_items(threshold=10, limit=10)
 if low_items.empty:
     st.success("✅ No items are currently at or below threshold 10.")
@@ -132,77 +136,65 @@ for idx, row in low_items.iterrows():
     avail_qty = max(1, int(expiry_layer["quantity"]))
     sugg_qty = max(1, min(to_transfer, avail_qty))
 
-    # Unique keys for widgets in card
     qkey = f"qty_{row['itemid']}"
     bckey = f"bc_{row['itemid']}"
     btnkey = f"refill_{row['itemid']}"
 
     with st.container():
-        st.markdown(f"""
-        <div class="card-container">
-        <div style="display: flex; flex-wrap: wrap; gap: 1.7rem; align-items: flex-start;">
-            <div style="min-width:220px;max-width:350px;">
-                <div style="font-size:1.27em;font-weight:700; color:#256179;line-height:1.3;">🛒 {row['itemname']}</div>
-                <div style="font-size:1em; color:#888;margin-top:0.2em;">Barcode: <span style="font-family:monospace;font-size:1em;">{row['barcode']}</span></div>
-            </div>
-            <div style="font-size:1.07em; min-width:160px;">
-                <span>📦 <b>Shelf Qty:</b> {shelfqty}</span>
-                <br><span>🚦 <b>Threshold:</b> {shelfthreshold}</span>
-            </div>
-            <div style="font-size:1.09em; min-width:140px;">
-                <span>🗺️ <b>Location:</b></span><br>
-                <span style="font-family:monospace; font-size:1.06em;">{expiry_layer.get('locid','')}</span>
-            </div>
-            <div style="min-width:120px;">
-                <div class="quantity-box">
-                <b>Qty to refill:</b><br>
+        st.markdown('<div class="compact-card">', unsafe_allow_html=True)
+        col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
+        # Item Info
+        with col1:
+            st.markdown(
+                f"""<div style="font-size:1.17em;font-weight:700;color:#236879;line-height:1.3;">
+                🛒 {row['itemname']}
                 </div>
-        """, unsafe_allow_html=True)
-        qty = st.number_input(
-            "",
-            min_value=1,
-            max_value=avail_qty,
-            value=sugg_qty,
-            key=qkey,
-            label_visibility="collapsed",
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown("""
-            <div style="min-width:180px;">
-            <div class="barcode-box">
-                <b>Scan/Enter Barcode:</b><br>
-        """, unsafe_allow_html=True)
-        barcode_entry = st.text_input(
-            "",
-            value="",
-            key=bckey,
-            placeholder="Scan barcode here...",
-            label_visibility="collapsed",
-        )
-        st.markdown("</div></div>", unsafe_allow_html=True)
-
-        barcode_correct = (barcode_entry.strip() == str(row["barcode"]))
-        status_msg = ""
-        if barcode_entry:
-            if barcode_correct:
-                status_msg = '<span class="confirmed-barcode">✅ Barcode confirmed</span>'
-            else:
-                status_msg = '<span class="not-matched-barcode">❌ Barcode does not match</span>'
-        st.markdown(f'<div style="min-width:140px; margin-top:8px;">{status_msg}</div>', unsafe_allow_html=True)
-
+                <div style="font-size:0.99em;color:#888;margin-top:0.18em;">
+                    Barcode: <span style="font-family:monospace;">{row['barcode']}</span>
+                </div>
+                <div style="font-size:1em; margin-top:0.35em;">
+                    📦 <b>Shelf Qty:</b> {shelfqty} <br>
+                    🚦 <b>Threshold:</b> {shelfthreshold} <br>
+                    🗺️ <b>Location:</b> <span style="font-family:monospace;">{expiry_layer.get('locid','')}</span>
+                </div>""",
+                unsafe_allow_html=True
+            )
+        # Quantity input
+        with col2:
+            st.markdown('<div class="quantity-box"><b>Qty to refill:</b></div>', unsafe_allow_html=True)
+            qty = st.number_input(
+                "",
+                min_value=1,
+                max_value=avail_qty,
+                value=sugg_qty,
+                key=qkey,
+                label_visibility="collapsed",
+            )
+        # Barcode entry
+        with col3:
+            st.markdown('<div class="barcode-box"><b>Scan/Enter Barcode:</b></div>', unsafe_allow_html=True)
+            barcode_entry = st.text_input(
+                "",
+                value="",
+                key=bckey,
+                placeholder="Scan barcode here...",
+                label_visibility="collapsed",
+            )
+            barcode_correct = (barcode_entry.strip() == str(row["barcode"]))
+            if barcode_entry:
+                if barcode_correct:
+                    st.markdown('<span class="confirmed-barcode">✅ Barcode confirmed</span>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<span class="not-matched-barcode">❌ Barcode does not match</span>', unsafe_allow_html=True)
         # Button
-        col_btn = st.columns([1, 2, 1])[1]
-        with col_btn:
+        with col4:
             refill_clicked = st.button(
-                "🚚 Refill & Log",
+                "🚚 Refill",
                 key=btnkey,
                 disabled=not barcode_correct,
                 help="Scan or enter the correct barcode to enable.",
                 type="primary",
                 use_container_width=True,
-                # Classes for style above (for some Streamlit themes)
-                # Disabled color handled by Streamlit.
             )
             if refill_clicked:
                 user = st.session_state.get("user_email", "AutoTransfer")
@@ -214,7 +206,9 @@ for idx, row in low_items.iterrows():
                     locid=expiry_layer.get("locid", ""),
                     by=user,
                 )
-                st.success(f"✅ <b>{row['itemname']}</b> refilled with <b>{qty}</b> units to <b>{expiry_layer.get('locid','')}</b>!", icon="🎉")
+                st.success(
+                    f"✅ <b>{row['itemname']}</b> refilled with <b>{qty}</b> units to <b>{expiry_layer.get('locid','')}</b>!",
+                    icon="🎉",
+                )
                 st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
