@@ -1,5 +1,4 @@
 import streamlit as st
-import pandas as pd
 from db_handler import DatabaseManager
 
 # ───── Handler ─────
@@ -66,7 +65,7 @@ class BarcodeShelfHandler(DatabaseManager):
 # ───── Page ─────
 handler = BarcodeShelfHandler()
 
-st.subheader("📤 Auto Transfer: Low Stock Items (Refill One-by-One)")
+st.subheader("📤 Auto Transfer: Low Stock Items (Barcode Confirmation Required)")
 
 low_items = handler.get_low_stock_items(threshold=10, limit=10)
 show_cols = [c for c in ["itemname", "shelfqty", "shelfthreshold", "barcode"] if c in low_items.columns]
@@ -82,10 +81,9 @@ st.dataframe(
     hide_index=True,
 )
 
-# Each item row: display transfer controls and button
 for idx, row in low_items.iterrows():
     st.markdown("---")
-    col0, col1, col2, col3, col4 = st.columns([2,2,2,2,2])
+    col0, col1, col2, col3, col4, col5 = st.columns([2,2,2,2,2,2])
     expiry_layer = handler.get_first_expiry_for_item(row["itemid"])
     if not expiry_layer:
         col0.error("No inventory layer found!")
@@ -101,6 +99,7 @@ for idx, row in low_items.iterrows():
     col0.markdown(f"Barcode: `{row['barcode']}`")
     col1.markdown(f"Shelf Qty: `{shelfqty}` / Threshold: `{shelfthreshold}`")
     col2.markdown(f"Location: `{expiry_layer.get('locid','')}`")
+
     qty = col3.number_input(
         "Qty",
         min_value=1,
@@ -108,8 +107,23 @@ for idx, row in low_items.iterrows():
         value=sugg_qty,
         key=f"qty_{row['itemid']}",
     )
-    # Button unique to this item
-    if col4.button("🚚 Refill", key=f"refill_{row['itemid']}"):
+
+    barcode_entry = col4.text_input(
+        "Enter/Scan Barcode to Confirm",
+        value="",
+        key=f"bc_{row['itemid']}",
+        placeholder="Scan barcode here...",
+    )
+
+    btn_disabled = (barcode_entry.strip() != str(row["barcode"]))
+
+    # Button enabled only if barcode matches
+    if col5.button(
+        "🚚 Refill",
+        key=f"refill_{row['itemid']}",
+        disabled=btn_disabled,
+        help="Enter the correct barcode to enable this button.",
+    ):
         user = st.session_state.get("user_email", "AutoTransfer")
         handler.move_layer(
             itemid=row["itemid"],
@@ -121,3 +135,10 @@ for idx, row in low_items.iterrows():
         )
         st.success(f"✅ {row['itemname']} refilled with {qty} units to {expiry_layer.get('locid','')}!")
         st.rerun()
+
+    # Visual hint
+    if barcode_entry and btn_disabled:
+        col4.error("❌ Barcode does not match.")
+    elif barcode_entry and not btn_disabled:
+        col4.success("✅ Barcode confirmed.")
+
