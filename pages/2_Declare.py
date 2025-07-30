@@ -19,7 +19,8 @@ class DeclareHandler(DatabaseManager):
             WHERE itemid=%s
             GROUP BY locid
             ORDER BY locid
-        """, (itemid,))
+        """, (int(itemid),))  # Always cast to int!
+
         return df
 
     def get_inventory_total(self, itemid):
@@ -27,17 +28,16 @@ class DeclareHandler(DatabaseManager):
             SELECT SUM(quantity) as total
             FROM inventory
             WHERE itemid=%s AND quantity > 0
-        """, (itemid,))
+        """, (int(itemid),))
         return int(df.iloc[0]['total']) if not df.empty and df.iloc[0]['total'] is not None else 0
 
     def subtract_inventory(self, itemid, qty):
-        # Subtracts qty from inventory, from the batch with earliest expiration
         batches = self.fetch_data("""
             SELECT expirationdate, cost_per_unit, quantity
             FROM inventory
             WHERE itemid=%s AND quantity > 0
             ORDER BY expirationdate ASC, cost_per_unit ASC
-        """, (itemid,))
+        """, (int(itemid),))
         left = qty
         for _, row in batches.iterrows():
             take = min(left, int(row['quantity']))
@@ -46,7 +46,7 @@ class DeclareHandler(DatabaseManager):
                 UPDATE inventory SET quantity=quantity-%s
                 WHERE itemid=%s AND expirationdate=%s AND cost_per_unit=%s AND quantity>=%s
                 """,
-                (take, itemid, row['expirationdate'], row['cost_per_unit'], take)
+                (take, int(itemid), row['expirationdate'], row['cost_per_unit'], take)
             )
             left -= take
             if left <= 0:
@@ -54,25 +54,35 @@ class DeclareHandler(DatabaseManager):
         return qty - left  # actual subtracted
 
     def set_shelf_quantity(self, itemid, locid, qty):
-        # Set (overwrite) the shelf quantity at locid
         exists = self.fetch_data(
             "SELECT quantity FROM shelf WHERE itemid=%s AND locid=%s",
-            (itemid, locid)
+            (int(itemid), locid)
         )
         if exists.empty:
             self.execute_command("""
                 INSERT INTO shelf (itemid, expirationdate, quantity, cost_per_unit, locid)
                 VALUES (%s, CURRENT_DATE, %s, 0, %s)
-            """, (itemid, qty, locid))
+            """, (int(itemid), qty, locid))
         else:
             self.execute_command("""
                 UPDATE shelf SET quantity=%s WHERE itemid=%s AND locid=%s
-            """, (qty, itemid, locid))
+            """, (qty, int(itemid), locid))
 
 st.set_page_config(layout="centered")
 st.title("🟢 Declare Selling Area Quantity (by Barcode)")
 
 handler = DeclareHandler()
+
+st.markdown("""
+<style>
+.catline {margin:0.08em 0 0.09em 0;font-size:1.1em;}
+.cat-class {color:#C61C1C;font-weight:bold;}
+.cat-dept {color:#004CBB;font-weight:bold;}
+.cat-sect {color:#098A23;font-weight:bold;}
+.cat-family {color:#FF8800;font-weight:bold;}
+.cat-val {color:#111;}
+</style>
+""", unsafe_allow_html=True)
 
 barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
 if not barcode:
@@ -80,22 +90,19 @@ if not barcode:
     st.stop()
 
 item = handler.get_item_by_barcode(barcode)
-if not item is None:
-    st.markdown(f"**Item:** {item['name']}  \n"
-                f"🔖 Barcode: `{item['barcode']}`")
+if item is not None:
+    st.markdown(f"**Item:** {item['name']}<br>🔖 Barcode: `{item['barcode']}`", unsafe_allow_html=True)
     st.markdown(
-        f"<div style='font-size:1.04em;'>"
-        f"<span style='color:#C61C1C;font-weight:bold;'>Class:</span> <span style='color:#222'>{item['classcat']}</span> &nbsp; "
-        f"<span style='color:#004CBB;font-weight:bold;'>Department:</span> <span style='color:#222'>{item['departmentcat']}</span><br>"
-        f"<span style='color:#098A23;font-weight:bold;'>Section:</span> <span style='color:#222'>{item['sectioncat']}</span> &nbsp; "
-        f"<span style='color:#FF8800;font-weight:bold;'>Family:</span> <span style='color:#222'>{item['familycat']}</span>"
-        f"</div>", unsafe_allow_html=True)
-    itemid = item['itemid']
+        f"<div class='catline'><span class='cat-class'>Class:</span> <span class='cat-val'>{item['classcat']}</span></div>"
+        f"<div class='catline'><span class='cat-dept'>Department:</span> <span class='cat-val'>{item['departmentcat']}</span></div>"
+        f"<div class='catline'><span class='cat-sect'>Section:</span> <span class='cat-val'>{item['sectioncat']}</span></div>"
+        f"<div class='catline'><span class='cat-family'>Family:</span> <span class='cat-val'>{item['familycat']}</span></div>",
+        unsafe_allow_html=True)
+    itemid = int(item['itemid'])
     shelf_entries = handler.get_shelf_entries(itemid)
     inventory_total = handler.get_inventory_total(itemid)
 
     if shelf_entries.empty:
-        # No declared quantity yet
         st.warning("No previous quantity declared for this item in the selling area.")
         default_locid = st.text_input("Shelf Location (locid)", key="declare_locid", max_chars=32)
         if not default_locid:
@@ -106,7 +113,6 @@ if not item is None:
         locations = shelf_entries['locid'].tolist()
         prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
-    # If multiple shelf locations, pick one to declare
     if len(locations) > 1:
         locid = st.selectbox("Shelf Location (locid)", locations)
         prev_qty = int(shelf_entries[shelf_entries['locid'] == locid]['qty'].iloc[0])
@@ -122,7 +128,6 @@ if not item is None:
     if confirm:
         diff = new_qty - prev_qty
         if diff > 0:
-            # Subtract from inventory
             actual_subtracted = handler.subtract_inventory(itemid, diff)
             st.success(f"Inventory reduced by {actual_subtracted}.")
         elif diff < 0:
