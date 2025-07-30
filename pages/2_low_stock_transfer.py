@@ -23,7 +23,6 @@ class BarcodeShelfHandler(DatabaseManager):
         )
 
     def get_first_expiry_for_item(self, itemid):
-        # Now also return locid
         df = self.fetch_data(
             """
             SELECT expirationdate, quantity, cost_per_unit, locid
@@ -67,9 +66,8 @@ class BarcodeShelfHandler(DatabaseManager):
 # ───── Page ─────
 handler = BarcodeShelfHandler()
 
-st.subheader("📤 Auto Transfer: 10 Lowest Stock Items (At or Below Threshold 10)")
+st.subheader("📤 Auto Transfer: Low Stock Items (Refill One-by-One)")
 
-# Get low stock candidates (at or below threshold)
 low_items = handler.get_low_stock_items(threshold=10, limit=10)
 show_cols = [c for c in ["itemname", "shelfqty", "shelfthreshold", "barcode"] if c in low_items.columns]
 
@@ -84,70 +82,40 @@ st.dataframe(
     hide_index=True,
 )
 
-# Build editable table for transfer
-transfer_rows = []
+# Each item row: display transfer controls and button
 for idx, row in low_items.iterrows():
-    to_transfer = row["shelfthreshold"] - row["shelfqty"]
+    st.markdown("---")
+    col0, col1, col2, col3, col4 = st.columns([2,2,2,2,2])
     expiry_layer = handler.get_first_expiry_for_item(row["itemid"])
     if not expiry_layer:
-        continue  # skip if no shelf layer
-    transfer_rows.append(
-        {
-            "itemid": row["itemid"],
-            "itemname": row["itemname"],
-            "barcode": row.get("barcode", ""),
-            "expirationdate": expiry_layer["expirationdate"],
-            "available_qty": expiry_layer["quantity"],
-            "cost": expiry_layer["cost_per_unit"],
-            "locid": expiry_layer.get("locid", ""),
-            "suggested_qty": max(1, min(to_transfer, expiry_layer["quantity"])),
-        }
-    )
+        col0.error("No inventory layer found!")
+        continue
 
-if not transfer_rows:
-    st.info("No transfer candidates available at this time.")
-    st.stop()
+    avail_qty = max(1, int(expiry_layer["quantity"]))
+    to_transfer = row["shelfthreshold"] - row["shelfqty"]
+    sugg_qty = max(1, min(to_transfer, avail_qty))
 
-st.markdown("### Review and edit transfer quantities before confirming:")
-editable = pd.DataFrame(transfer_rows)
-editable["transfer_qty"] = editable["suggested_qty"]
-
-for i in range(len(editable)):
-    col1, col2, col3 = st.columns([2, 2, 2])
-    col1.markdown(f"**{editable.loc[i, 'itemname']}** (Barcode: {editable.loc[i, 'barcode']})")
-    avail_qty = max(1, int(editable.loc[i, "available_qty"]))
-    sugg_qty = max(1, int(editable.loc[i, "suggested_qty"]))
-    editable.loc[i, "transfer_qty"] = col2.number_input(
+    col0.markdown(f"**{row['itemname']}**")
+    col0.markdown(f"Barcode: `{row['barcode']}`")
+    col1.markdown(f"Shelf Qty: `{row['shelfqty']}` / Threshold: `{row['shelfthreshold']}`")
+    col2.markdown(f"Location: `{expiry_layer.get('locid','')}`")
+    qty = col3.number_input(
         "Qty",
         min_value=1,
         max_value=avail_qty,
-        value=min(sugg_qty, avail_qty),
-        key=f"qty_{i}",
+        value=sugg_qty,
+        key=f"qty_{row['itemid']}",
     )
-    col3.markdown(f"**Shelf Location:** `{editable.loc[i, 'locid']}`")
-
-if st.button("🚚 Confirm & Transfer All"):
-    errors = []
-    for idx, row in editable.iterrows():
-        if not row["locid"]:
-            errors.append(f"{row['itemname']}: Shelf location missing (check shelf table).")
-        elif row["transfer_qty"] > row["available_qty"]:
-            errors.append(f"{row['itemname']}: Not enough in inventory for transfer.")
-
-    if errors:
-        for e in errors:
-            st.error(e)
-        st.stop()
-
-    user = st.session_state.get("user_email", "AutoTransfer")
-    for idx, row in editable.iterrows():
+    # Button unique to this item
+    if col4.button("🚚 Refill", key=f"refill_{row['itemid']}"):
+        user = st.session_state.get("user_email", "AutoTransfer")
         handler.move_layer(
             itemid=row["itemid"],
-            expiration=row["expirationdate"],
-            qty=int(row["transfer_qty"]),
-            cost=row["cost"],
-            locid=row["locid"],
+            expiration=expiry_layer["expirationdate"],
+            qty=int(qty),
+            cost=expiry_layer["cost_per_unit"],
+            locid=expiry_layer.get("locid", ""),
             by=user,
         )
-    st.success("✅ Transfer completed for all selected items!")
-    st.experimental_rerun()
+        st.success(f"✅ {row['itemname']} refilled with {qty} units to {expiry_layer.get('locid','')}!")
+        st.experimental_rerun()
