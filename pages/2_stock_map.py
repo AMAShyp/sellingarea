@@ -120,21 +120,27 @@ for r in low_items.itertuples():
     shelfthreshold = int(getattr(r, "shelfthreshold", 1))
     shelfavg = float(getattr(r, "shelfaverage", 0) or 0)
 
-    refill_suggestion = max(
-        shelfthreshold,                # At least threshold
-        int(shelfavg - current_qty) if shelfavg > current_qty else shelfthreshold,
-        1
-    )
-    max_refill = max(max_qty - current_qty, 1)
-    sugg = min(refill_suggestion, max_refill)
+    # The highest possible allowed to refill
+    max_refill = max(max_qty - current_qty, 0)
+    if max_refill < shelfthreshold - current_qty:
+        # Can't even reach threshold
+        st.warning(f"🟠 {r.itemname}: Shelf already holds {current_qty}, cannot refill below threshold {shelfthreshold} (max allowed: {max_qty})")
+        continue
+
+    # Suggested value: shelfaverage - shelfqty (or shelfthreshold if higher), not exceeding max_refill
+    suggested = max(int(shelfavg - current_qty), shelfthreshold - current_qty, 1)
+    suggested = min(suggested, max_refill)
+    min_input = max(1, shelfthreshold - current_qty)
+    max_input = max_refill if max_refill >= min_input else min_input
+
     qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
     c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
     c1.markdown(f"<div class='item-card'><b>{r.itemname}</b><br>"
                 f"📦 {current_qty} / {max_qty} (thr: {shelfthreshold}, avg: {shelfavg}) | 🗺️ {locid}<br>"
                 f"🔖 <span style='font-family:monospace'>{r.barcode}</span></div>",unsafe_allow_html=True)
     qty = c2.number_input(
-        "", min_value=shelfthreshold, max_value=max_refill,
-        value=sugg, key=qk, label_visibility="collapsed"
+        "", min_value=min_input, max_value=max_input,
+        value=suggested, key=qk, label_visibility="collapsed"
     )
     bc  = c3.text_input("",key=bck,placeholder="scan",label_visibility="collapsed")
     ok  = bc.strip()==r.barcode
