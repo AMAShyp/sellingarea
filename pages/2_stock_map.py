@@ -1,0 +1,224 @@
+import streamlit as st
+from db_handler import DatabaseManager
+import plotly.graph_objects as go
+from PIL import Image
+
+# --- MAP HANDLER (basic version; adjust as needed) ---
+class ShelfMapHandler:
+    def get_locations(self):
+        # Replace this with actual DB loading or file logic
+        # Example row: {"locid": "rd26", "x_pct": 0.30, "y_pct": 0.55, "w_pct": 0.10, "h_pct": 0.06, "rotation_deg": 0}
+        return [
+            # Add real locations here...
+        ]
+    def get_png_path(self):
+        return "assets/shelf_map.png"
+
+def _img_ratio(path: str) -> float:
+    try:
+        with open(path, "rb") as f:
+            f.seek(16)
+            width = int.from_bytes(f.read(4), "big")
+            height = int.from_bytes(f.read(4), "big")
+        return height / width
+    except Exception:
+        return 1.0
+
+@st.cache_data(ttl=3600)
+def load_locations(handler):
+    return handler.get_locations()
+@st.cache_resource
+def load_bg(handler):
+    return Image.open(handler.get_png_path())
+
+def shelf_map_for_loc(locid, locs, img, png_ratio):
+    shapes = []
+    hi_row = next((row for row in locs if row["locid"] == locid), None)
+    for row in locs:
+        x, y, w, h = float(row["x_pct"]), float(row["y_pct"]), float(row["w_pct"]), float(row["h_pct"])
+        deg = float(row.get("rotation_deg") or 0.0)
+        cx = x + w/2
+        cy = 1 - (y + h/2)
+        y_draw = 1 - y - h
+        is_hi = row["locid"] == locid
+        fill = "rgba(26,188,156,0.09)" if not is_hi else "rgba(255,128,0,0.20)"
+        line = dict(width=2 if is_hi else 1, color="#FF8000" if is_hi else "#1ABC9C")
+        if deg == 0:
+            shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
+        else:
+            rad = math.radians(deg)
+            cos, sin = math.cos(rad), math.sin(rad)
+            pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
+            path = "M " + " L ".join(f"{cx+u*cos-v*sin},{cy+u*sin+v*cos}" for u, v in pts) + " Z"
+            shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
+        if is_hi:
+            r = max(w, h) * 0.60
+            shapes.append(dict(type="circle", xref="x", yref="y",
+                               x0=cx - r, x1=cx + r, y0=cy - r, y1=cy + r,
+                               line=dict(color="#FF8000", width=2, dash="dot")))
+    fig = go.Figure()
+    if img is not None:
+        fig.add_layout_image(dict(
+            source=img, xref="x", yref="y",
+            x=0, y=1, sizex=1, sizey=1,
+            xanchor="left", yanchor="top", layer="below"))
+    fig.update_layout(shapes=shapes, height=180, margin=dict(l=5,r=5,t=5,b=5))
+    fig.update_xaxes(visible=False, range=[0,1], constrain="domain")
+    fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=png_ratio)
+    fig.update_traces(hoverinfo="skip", selector=dict(type="scatter"))
+    return fig
+
+# --- BARCODE HANDLER ---
+class BarcodeShelfHandler(DatabaseManager):
+    def get_low_stock_items(self, threshold=10, limit=10):
+        return self.fetch_data(
+            """
+            SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode, 
+                   s.totalquantity AS shelfqty, i.shelfthreshold
+            FROM item i
+            JOIN (
+                SELECT itemid, SUM(quantity) AS totalquantity
+                FROM shelf
+                GROUP BY itemid
+            ) s ON i.itemid = s.itemid
+            WHERE s.totalquantity <= COALESCE(i.shelfthreshold, %s)
+            ORDER BY s.totalquantity ASC
+            LIMIT %s
+            """,
+            (threshold, limit),
+        )
+    def get_first_expiry_for_item(self, itemid):
+        df = self.fetch_data(
+            """
+            SELECT expirationdate, quantity, cost_per_unit, locid
+            FROM shelf
+            WHERE itemid = %s AND quantity > 0
+            ORDER BY expirationdate ASC, cost_per_unit ASC
+            LIMIT 1
+            """,
+            (itemid,),
+        )
+        return df.iloc[0].to_dict() if not df.empty else {}
+    def move_layer(self, *, itemid, expiration, qty, cost, locid, by):
+        self.execute_command(
+            """
+            UPDATE inventory
+            SET quantity = quantity - %s
+            WHERE itemid=%s AND expirationdate=%s AND cost_per_unit=%s AND quantity >= %s
+            """,
+            (qty, itemid, expiration, cost, qty),
+        )
+        self.execute_command(
+            """
+            INSERT INTO shelf (itemid, expirationdate, quantity, cost_per_unit, locid)
+            VALUES (%s,%s,%s,%s,%s)
+            ON CONFLICT (itemid, expirationdate, cost_per_unit, locid)
+            DO UPDATE SET quantity = shelf.quantity + EXCLUDED.quantity, lastupdated = CURRENT_TIMESTAMP
+            """,
+            (itemid, expiration, qty, cost, locid),
+        )
+        self.execute_command(
+            """
+            INSERT INTO shelfentries (itemid, expirationdate, quantity, createdby, locid)
+            VALUES (%s,%s,%s,%s,%s)
+            """,
+            (itemid, expiration, qty, by, locid),
+        )
+
+handler = BarcodeShelfHandler()
+map_handler = ShelfMapHandler()
+
+st.set_page_config(layout="wide")
+st.title("📤 Auto Refill: Low-Stock Items + Shelf Location Map")
+
+low_items = handler.get_low_stock_items(threshold=10, limit=10)
+if low_items.empty:
+    st.success("✅ All items are sufficiently stocked.")
+    st.stop()
+
+locs = load_locations(map_handler)
+bg_img = load_bg(map_handler)
+img_ratio = _img_ratio(map_handler.get_png_path())
+
+st.markdown("""
+<style>
+.item-card {
+    padding: 0.4rem 0.5rem;
+    border-radius: 0.7rem;
+    background: #f7fcfa;
+    border: 1px solid #c7ebe5;
+    font-size: 1.08em;
+    margin-bottom: 0;
+}
+.success-text { color: green; font-weight: bold; margin-top: 0.1em; }
+.error-text { color: #cc3300; font-weight: bold; margin-top: 0.1em; }
+.refill-btn button {
+    background-color: #1ABC9C !important;
+    color: white !important;
+    font-weight: bold;
+    border-radius: 0.5rem !important;
+    padding: 0.3rem 0.8rem !important;
+    margin-top: 0.25em;
+}
+</style>
+""", unsafe_allow_html=True)
+
+for idx, row in low_items.iterrows():
+    expiry_layer = handler.get_first_expiry_for_item(row["itemid"])
+    if not expiry_layer:
+        st.error(f"❌ Inventory data missing for {row['itemname']}.")
+        continue
+
+    shelfqty = int(row["shelfqty"])
+    shelfthreshold = int(row["shelfthreshold"])
+    to_transfer = max(1, shelfthreshold - shelfqty)
+    avail_qty = int(expiry_layer["quantity"])
+    suggested_qty = min(to_transfer, avail_qty)
+    locid = expiry_layer.get("locid", "")
+
+    qty_key = f"qty_{row['itemid']}"
+    barcode_key = f"barcode_{row['itemid']}"
+    button_key = f"refill_{row['itemid']}"
+
+    cols = st.columns([1.1, 3, 1, 1.8, 0.9])
+    # Map (no gap, no container)
+    if locid:
+        fig = shelf_map_for_loc(locid, locs, bg_img, img_ratio)
+        cols[0].plotly_chart(fig, use_container_width=True)
+    else:
+        cols[0].info("No location", icon="🗺️")
+
+    # Item card (very tight spacing)
+    cols[1].markdown(
+        f"<div class='item-card'><b>{row['itemname']}</b><br>"
+        f"📦 Shelf: {shelfqty}/{shelfthreshold} | 🗺️ {locid}<br>"
+        f"<span style='font-size:0.96em;'>🔖 <span style='font-family:monospace;'>{row['barcode']}</span></span></div>",
+        unsafe_allow_html=True
+    )
+
+    # Quantity (tight)
+    qty = cols[2].number_input("Qty", 1, avail_qty, suggested_qty, key=qty_key, label_visibility="collapsed")
+
+    # Barcode input (tight)
+    barcode_input = cols[3].text_input("Barcode", key=barcode_key, placeholder="Scan barcode...", label_visibility="collapsed")
+    barcode_correct = barcode_input.strip() == row["barcode"]
+    if barcode_input:
+        if barcode_correct:
+            cols[3].markdown("<div class='success-text'>✅ Barcode matched</div>", unsafe_allow_html=True)
+        else:
+            cols[3].markdown("<div class='error-text'>❌ Incorrect barcode</div>", unsafe_allow_html=True)
+
+    # Button (tight, aligned)
+    refill_clicked = cols[4].button("🚚", key=button_key, disabled=not barcode_correct, help="Refill", type="primary")
+    if refill_clicked:
+        user = st.session_state.get("user_email", "AutoTransfer")
+        handler.move_layer(
+            itemid=row["itemid"],
+            expiration=expiry_layer["expirationdate"],
+            qty=int(qty),
+            cost=expiry_layer["cost_per_unit"],
+            locid=locid,
+            by=user,
+        )
+        st.success(f"✅ {row['itemname']} refilled ({qty} units to {locid})!")
+        st.rerun()
