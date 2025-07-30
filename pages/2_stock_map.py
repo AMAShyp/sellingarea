@@ -7,32 +7,40 @@ class BarcodeShelfHandler(DatabaseManager):
     def get_low_stock_items(self, thr=10, limit=10):
         return self.fetch_data("""
             SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode,
-                   s.totalquantity AS shelfqty, i.shelfthreshold, i.shelfaverage
+                   s.totalquantity AS shelfqty,
+                   i.shelfthreshold, i.shelfaverage,
+                   s2.quantity as shelf_max_qty, s2.locid
             FROM item i
             JOIN (SELECT itemid,SUM(quantity) AS totalquantity FROM shelf GROUP BY itemid) s
                  ON i.itemid=s.itemid
+            JOIN shelf s2 ON s2.itemid = i.itemid
             WHERE s.totalquantity <= COALESCE(i.shelfthreshold,%s)
-            ORDER BY s.totalquantity ASC LIMIT %s""",(thr,limit))
-    def get_first_layer(self,itemid):
-        df=self.fetch_data("""
-            SELECT expirationdate,quantity,cost_per_unit,locid
+            ORDER BY s.totalquantity ASC LIMIT %s
+        """, (thr, limit))
+
+    def get_first_layer(self, itemid):
+        df = self.fetch_data("""
+            SELECT expirationdate, quantity, cost_per_unit, locid
             FROM shelf WHERE itemid=%s AND quantity>0
-            ORDER BY expirationdate,cost_per_unit LIMIT 1""",(itemid,))
+            ORDER BY expirationdate,cost_per_unit LIMIT 1
+        """, (itemid,))
         return df.iloc[0].to_dict() if not df.empty else {}
-    def move_layer(self,*,itemid,expiration,qty,cost,locid,by):
+
+    def move_layer(self, *, itemid, expiration, qty, cost, locid, by):
         self.execute_command("""
             UPDATE inventory SET quantity=quantity-%s
-            WHERE itemid=%s AND expirationdate=%s AND cost_per_unit=%s AND quantity>=%s""",
-            (qty,itemid,expiration,cost,qty))
+            WHERE itemid=%s AND expirationdate=%s AND cost_per_unit=%s AND quantity>=%s
+        """, (qty, itemid, expiration, cost, qty))
         self.execute_command("""
             INSERT INTO shelf (itemid,expirationdate,quantity,cost_per_unit,locid)
             VALUES (%s,%s,%s,%s,%s)
             ON CONFLICT (itemid,expirationdate,cost_per_unit,locid)
-            DO UPDATE SET quantity=shelf.quantity+EXCLUDED.quantity,lastupdated=CURRENT_TIMESTAMP""",
-            (itemid,expiration,qty,cost,locid))
+            DO UPDATE SET quantity=shelf.quantity+EXCLUDED.quantity,lastupdated=CURRENT_TIMESTAMP
+        """, (itemid, expiration, qty, cost, locid))
         self.execute_command("""
             INSERT INTO shelfentries(itemid,expirationdate,quantity,createdby,locid)
-            VALUES (%s,%s,%s,%s,%s)""",(itemid,expiration,qty,by,locid))
+            VALUES (%s,%s,%s,%s,%s)
+        """, (itemid, expiration, qty, by, locid))
 
 def map_with_highlights(locs, highlight_locs, label_offset=0.018):
     import math
@@ -50,11 +58,11 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
         else:
             rad = math.radians(deg)
             cos, sin = math.cos(rad), math.sin(rad)
-            pts = [(-w/2,-h/2),(w/2,-h/2),(w/2,h/2),(-w/2,h/2)]
-            path = "M " + " L ".join(f"{cx+u*cos-v*sin},{cy+u*sin+v*cos}" for u,v in pts) + " Z"
+            pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
+            path = "M " + " L ".join(f"{cx+u*cos-v*sin},{cy+u*sin+v*cos}" for u, v in pts) + " Z"
             shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
         if is_hi:
-            r = max(w, h)*0.5
+            r = max(w, h) * 0.5
             shapes.append(dict(type="circle",xref="x",yref="y",
                                x0=cx-r,x1=cx+r,y0=cy-r,y1=cy+r,
                                line=dict(color="#d8000c",width=2,dash="dot")))
@@ -83,7 +91,7 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (Default qty = shelfaverage - shelfqty, up to available)")
+st.title("📤 Low-Stock Items Map (Allowed range: shelfthreshold → shelf max quantity)")
 
 low_items = handler.get_low_stock_items()
 if low_items.empty:
@@ -106,23 +114,28 @@ st.markdown("""
 for r in low_items.itertuples():
     layer = handler.get_first_layer(r.itemid)
     if not layer: continue
-    locid = layer.get("locid","")
-    avail = int(layer["quantity"])
-    # Robustly calculate the suggested qty: shelfaverage - shelfqty, at least 1, up to avail
-    try:
-        shelfavg = float(getattr(r,"shelfaverage",0) or 0)
-        shelfqty = int(r.shelfqty)
-        needed = int(shelfavg - shelfqty)
-        sugg = needed if needed > 0 else 1
-    except Exception:
-        sugg = 1
-    sugg = min(sugg, avail) if avail >= 1 else 1
+    locid = getattr(r, "locid", layer.get("locid",""))
+    current_qty = int(r.shelfqty)
+    max_qty = int(getattr(r, "shelf_max_qty", layer.get("quantity", 0)))
+    shelfthreshold = int(getattr(r, "shelfthreshold", 1))
+    shelfavg = float(getattr(r, "shelfaverage", 0) or 0)
+
+    refill_suggestion = max(
+        shelfthreshold,                # At least threshold
+        int(shelfavg - current_qty) if shelfavg > current_qty else shelfthreshold,
+        1
+    )
+    max_refill = max(max_qty - current_qty, 1)
+    sugg = min(refill_suggestion, max_refill)
     qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
     c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
     c1.markdown(f"<div class='item-card'><b>{r.itemname}</b><br>"
-                f"📦 {r.shelfqty}/{r.shelfthreshold} (avg: {getattr(r,'shelfaverage','-')} ) | 🗺️ {locid}<br>"
+                f"📦 {current_qty} / {max_qty} (thr: {shelfthreshold}, avg: {shelfavg}) | 🗺️ {locid}<br>"
                 f"🔖 <span style='font-family:monospace'>{r.barcode}</span></div>",unsafe_allow_html=True)
-    qty = c2.number_input("",1,avail,sugg,key=qk,label_visibility="collapsed")
+    qty = c2.number_input(
+        "", min_value=shelfthreshold, max_value=max_refill,
+        value=sugg, key=qk, label_visibility="collapsed"
+    )
     bc  = c3.text_input("",key=bck,placeholder="scan",label_visibility="collapsed")
     ok  = bc.strip()==r.barcode
     if bc: c3.markdown(f"<span class='{ 'good' if ok else 'bad'}'>{'✅' if ok else '❌'}</span>",unsafe_allow_html=True)
