@@ -83,7 +83,7 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (Default quantity: shelfaverage minus shelfqty)")
+st.title("📤 Low-Stock Items Map (Default qty = shelfaverage minus shelfqty)")
 
 low_items = handler.get_low_stock_items()
 if low_items.empty:
@@ -108,17 +108,19 @@ for r in low_items.itertuples():
     if not layer: continue
     locid = layer.get("locid","")
     avail = int(layer["quantity"])
-    shelfavg = getattr(r,"shelfaverage",None)
-    # Use shelfaverage - shelfqty as default, fallback to 1 if not possible
+    # Calculate suggested quantity robustly
     try:
-        needed = max(1, int(float(shelfavg)) - int(r.shelfqty)) if shelfavg is not None else 1
+        shelfavg = float(getattr(r,"shelfaverage",0) or 0)
+        shelfqty = int(r.shelfqty)
+        needed = shelfavg - shelfqty
+        sugg = int(needed) if needed > 0 else 1
     except Exception:
-        needed = 1
-    sugg  = min(needed,avail)
+        sugg = 1
+    sugg = min(max(sugg, 1), avail)
     qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
     c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
     c1.markdown(f"<div class='item-card'><b>{r.itemname}</b><br>"
-                f"📦 {r.shelfqty}/{r.shelfthreshold} (avg: {shelfavg if shelfavg is not None else '-'} ) | 🗺️ {locid}<br>"
+                f"📦 {r.shelfqty}/{r.shelfthreshold} (avg: {getattr(r,'shelfaverage','-')} ) | 🗺️ {locid}<br>"
                 f"🔖 <span style='font-family:monospace'>{r.barcode}</span></div>",unsafe_allow_html=True)
     qty = c2.number_input("",1,avail,sugg,key=qk,label_visibility="collapsed")
     bc  = c3.text_input("",key=bck,placeholder="scan",label_visibility="collapsed")
