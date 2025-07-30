@@ -3,10 +3,10 @@ from db_handler import DatabaseManager
 import plotly.graph_objects as go
 from PIL import Image
 
-# --- MAP HANDLER (use your own implementation!) ---
+# --- MAP HANDLER ---
 class ShelfMapHandler:
     def get_locations(self):
-        # Replace with your real loader or DB
+        # Replace this with actual loader/DB logic
         return [
             # Example: {"locid": "r12g2", "x_pct": 0.30, "y_pct": 0.55, "w_pct": 0.10, "h_pct": 0.06, "rotation_deg": 0}
         ]
@@ -32,8 +32,8 @@ def load_bg(_handler):
     return Image.open(_handler.get_png_path())
 
 def shelf_map_for_loc(locid, locs, img, png_ratio):
+    import math
     shapes = []
-    hi_row = next((row for row in locs if row["locid"] == locid), None)
     for row in locs:
         x, y, w, h = float(row["x_pct"]), float(row["y_pct"]), float(row["w_pct"]), float(row["h_pct"])
         deg = float(row.get("rotation_deg") or 0.0)
@@ -46,7 +46,6 @@ def shelf_map_for_loc(locid, locs, img, png_ratio):
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
         else:
-            import math
             rad = math.radians(deg)
             cos, sin = math.cos(rad), math.sin(rad)
             pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
@@ -183,7 +182,7 @@ for idx, row in low_items.iterrows():
     cols = st.columns([1.07, 2.95, 1, 1.55, 0.7])
     if locid:
         fig = shelf_map_for_loc(locid, locs, bg_img, img_ratio)
-        cols[0].plotly_chart(fig, use_container_width=True)
+        cols[0].plotly_chart(fig, use_container_width=True, key=f"map_{row['itemid']}")
     else:
         cols[0].info("No location", icon="🗺️")
     cols[1].markdown(
