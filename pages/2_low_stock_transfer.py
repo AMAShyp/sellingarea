@@ -23,10 +23,11 @@ class BarcodeShelfHandler(DatabaseManager):
         )
 
     def get_first_expiry_for_item(self, itemid):
+        # Now also return locid
         df = self.fetch_data(
             """
-            SELECT expirationdate, quantity, cost_per_unit
-            FROM inventory
+            SELECT expirationdate, quantity, cost_per_unit, locid
+            FROM shelf
             WHERE itemid = %s AND quantity > 0
             ORDER BY expirationdate ASC, cost_per_unit ASC
             LIMIT 1
@@ -89,7 +90,7 @@ for idx, row in low_items.iterrows():
     to_transfer = row["shelfthreshold"] - row["shelfqty"]
     expiry_layer = handler.get_first_expiry_for_item(row["itemid"])
     if not expiry_layer:
-        continue  # skip if no inventory layer
+        continue  # skip if no shelf layer
     transfer_rows.append(
         {
             "itemid": row["itemid"],
@@ -98,6 +99,7 @@ for idx, row in low_items.iterrows():
             "expirationdate": expiry_layer["expirationdate"],
             "available_qty": expiry_layer["quantity"],
             "cost": expiry_layer["cost_per_unit"],
+            "locid": expiry_layer.get("locid", ""),
             "suggested_qty": max(1, min(to_transfer, expiry_layer["quantity"])),
         }
     )
@@ -109,13 +111,12 @@ if not transfer_rows:
 st.markdown("### Review and edit transfer quantities before confirming:")
 editable = pd.DataFrame(transfer_rows)
 editable["transfer_qty"] = editable["suggested_qty"]
-editable["locid"] = ""  # Let user pick location
 
 for i in range(len(editable)):
     col1, col2, col3 = st.columns([2, 2, 2])
     col1.markdown(f"**{editable.loc[i, 'itemname']}** (Barcode: {editable.loc[i, 'barcode']})")
-    avail_qty = max(1, int(editable.loc[i, "available_qty"]))  # never below 1
-    sugg_qty = max(1, int(editable.loc[i, "suggested_qty"]))   # never below 1
+    avail_qty = max(1, int(editable.loc[i, "available_qty"]))
+    sugg_qty = max(1, int(editable.loc[i, "suggested_qty"]))
     editable.loc[i, "transfer_qty"] = col2.number_input(
         "Qty",
         min_value=1,
@@ -123,17 +124,13 @@ for i in range(len(editable)):
         value=min(sugg_qty, avail_qty),
         key=f"qty_{i}",
     )
-    editable.loc[i, "locid"] = col3.text_input(
-        "To Location",
-        value="",
-        key=f"loc_{i}",
-    )
+    col3.markdown(f"**Shelf Location:** `{editable.loc[i, 'locid']}`")
 
 if st.button("🚚 Confirm & Transfer All"):
     errors = []
     for idx, row in editable.iterrows():
         if not row["locid"]:
-            errors.append(f"{row['itemname']}: Location required.")
+            errors.append(f"{row['itemname']}: Shelf location missing (check shelf table).")
         elif row["transfer_qty"] > row["available_qty"]:
             errors.append(f"{row['itemname']}: Not enough in inventory for transfer.")
 
