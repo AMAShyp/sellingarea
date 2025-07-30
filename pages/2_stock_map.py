@@ -91,7 +91,7 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (Allowed range: shelfthreshold → shelf max quantity)")
+st.title("📤 Low-Stock Items Map (Allowed: shelfthreshold to shelf max qty)")
 
 low_items = handler.get_low_stock_items()
 if low_items.empty:
@@ -119,27 +119,25 @@ for r in low_items.itertuples():
     max_qty = int(getattr(r, "shelf_max_qty", layer.get("quantity", 0)))
     shelfthreshold = int(getattr(r, "shelfthreshold", 1))
     shelfavg = float(getattr(r, "shelfaverage", 0) or 0)
-
-    # The highest possible allowed to refill
+    # Compute max allowed to refill
     max_refill = max(max_qty - current_qty, 0)
-    if max_refill < shelfthreshold - current_qty:
-        # Can't even reach threshold
-        st.warning(f"🟠 {r.itemname}: Shelf already holds {current_qty}, cannot refill below threshold {shelfthreshold} (max allowed: {max_qty})")
-        continue
-
-    # Suggested value: shelfaverage - shelfqty (or shelfthreshold if higher), not exceeding max_refill
-    suggested = max(int(shelfavg - current_qty), shelfthreshold - current_qty, 1)
-    suggested = min(suggested, max_refill)
     min_input = max(1, shelfthreshold - current_qty)
-    max_input = max_refill if max_refill >= min_input else min_input
-
+    # Compute suggested
+    needed = int(shelfavg - current_qty) if shelfavg > current_qty else min_input
+    suggested = max(needed, min_input)
+    # Don't allow default value to be > max_refill
+    if max_refill < min_input:
+        st.warning(f"🟠 {r.itemname}: Shelf holds {current_qty}, cannot refill below threshold {shelfthreshold} (max: {max_qty})")
+        continue
+    if suggested > max_refill:
+        suggested = max_refill
     qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
     c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
     c1.markdown(f"<div class='item-card'><b>{r.itemname}</b><br>"
                 f"📦 {current_qty} / {max_qty} (thr: {shelfthreshold}, avg: {shelfavg}) | 🗺️ {locid}<br>"
                 f"🔖 <span style='font-family:monospace'>{r.barcode}</span></div>",unsafe_allow_html=True)
     qty = c2.number_input(
-        "", min_value=min_input, max_value=max_input,
+        "", min_value=min_input, max_value=max_refill,
         value=suggested, key=qk, label_visibility="collapsed"
     )
     bc  = c3.text_input("",key=bck,placeholder="scan",label_visibility="collapsed")
