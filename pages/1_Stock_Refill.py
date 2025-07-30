@@ -142,11 +142,14 @@ st.markdown("""
 .scan-btn button{background:#FFB300!important;color:#252a2c!important;font-weight:bold;border-radius:.35em!important;}
 .refill-btn button{background:#1abc9c!important;color:#fff!important;font-weight:bold;
                    border-radius:.45rem!important;padding:.15rem .57rem!important;margin-top:.03rem}
-</style>""", unsafe_allow_html=True)
+</style>""",unsafe_allow_html=True)
 
 if QR_AVAILABLE:
     if "scan_states" not in st.session_state:
         st.session_state["scan_states"] = {}
+    scan_states = st.session_state["scan_states"]
+else:
+    scan_states = {}
 
 for r in low_items.itertuples():
     layer = handler.get_first_layer(r.itemid)
@@ -178,8 +181,7 @@ for r in low_items.itertuples():
     scan_key = f"scan_{r.itemid}"
     input_key = f"barcode_input_{r.itemid}"
     cam_key = f"barcode_cam_{r.itemid}"
-    scan_states = st.session_state.setdefault("scan_states", {})
-    show_scan = scan_states.get(r.itemid, False)
+    show_scan = scan_states.get("active_scan") == r.itemid if QR_AVAILABLE else False
 
     with st.container():
         c1, c2, c3, c4 = st.columns([3, 0.9, 2, 1.3])
@@ -199,22 +201,19 @@ for r in low_items.itertuples():
             key=f"qty_{r.itemid}", label_visibility="collapsed"
         )
 
-        # Scan button per row
         bc_col = c3
+        # Scan button per row (only one open at a time)
         if QR_AVAILABLE:
             scan_btn = c4.button("📷 Scan", key=f"btn_scan_{r.itemid}", help="Scan barcode with camera", type="secondary")
             if scan_btn:
-                scan_states[r.itemid] = not show_scan
-                st.session_state["scan_states"] = scan_states
+                st.session_state["scan_states"] = {"active_scan": r.itemid}
                 st.rerun()
-            # Show camera if toggled
             if show_scan:
                 st.markdown("<div class='scan-hint'>Aim barcode for this item at the camera below.</div>", unsafe_allow_html=True)
                 scanned = qrcode_scanner(key=cam_key) or ""
                 if scanned:
                     st.session_state[input_key] = scanned
-                    scan_states[r.itemid] = False
-                    st.session_state["scan_states"] = scan_states
+                    st.session_state["scan_states"] = {}  # auto-close scan after scan
                     st.rerun()
         barcode_val = bc_col.text_input("", key=input_key, placeholder="Type or scan...", label_visibility="collapsed")
         ok = barcode_val.strip() == barcode
