@@ -186,7 +186,7 @@ for r in low_items.itertuples():
     bc  = c3.text_input("",key=bck,placeholder="scan",label_visibility="collapsed")
     ok  = bc.strip()==barcode
     if bc: c3.markdown(f"<span class='{ 'good' if ok else 'bad'}'>{'✅' if ok else '❌'}</span>",unsafe_allow_html=True)
-    fire=c4.button("🚚",key=btnk,disabled=not ok,type="primary")
+    fire=c4.button("🛒",key=btnk,disabled=not ok,type="primary")
     if fire:
         handler.move_layer(itemid=r.itemid,expiration=layer["expirationdate"],
                            qty=int(qty),cost=layer["cost_per_unit"],locid=locid,
