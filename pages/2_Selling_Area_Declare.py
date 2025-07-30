@@ -95,13 +95,12 @@ barcode_mode = st.radio("Choose barcode input method:", ["Type / Scan in input b
 if barcode_mode == "Type / Scan in input box":
     barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
 elif QR_AVAILABLE:
-    scanned = qrcode_scanner(key="barcode_cam", label="Scan barcode using phone camera")
+    scanned = qrcode_scanner(key="barcode_cam")
     barcode = scanned or ""
     if barcode:
         st.success(f"Scanned: {barcode}")
     else:
         st.info("Open camera, show barcode in view.")
-
 else:
     st.warning("Camera scanning component not installed. Please use the input box, or `pip install streamlit-qrcode-scanner`.")
 
