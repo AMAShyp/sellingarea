@@ -7,7 +7,7 @@ class BarcodeShelfHandler(DatabaseManager):
     def get_low_stock_items(self, thr=10, limit=10):
         return self.fetch_data("""
             SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode,
-                   s.totalquantity AS shelfqty,              -- current on shelf (SUM of shelf.quantity)
+                   s.totalquantity AS shelfqty,
                    i.shelfthreshold, i.shelfaverage,
                    s2.locid, s2.quantity as shelf_current_qty
             FROM item i
@@ -26,14 +26,23 @@ class BarcodeShelfHandler(DatabaseManager):
         """, (itemid,))
         return df.iloc[0].to_dict() if not df.empty else {}
 
-    def get_available_inventory(self, itemid):
+    def get_inventory_info(self, itemid):
+        # We show the inventory entry with the largest available quantity
         df = self.fetch_data("""
-            SELECT SUM(quantity) as available_qty
+            SELECT quantity, storagelocation, expirationdate
             FROM inventory
             WHERE itemid=%s AND quantity > 0
+            ORDER BY quantity DESC, expirationdate ASC LIMIT 1
         """, (itemid,))
-        # Return 0 if no rows, else available quantity as int
-        return int(df.iloc[0]['available_qty']) if not df.empty and df.iloc[0]['available_qty'] is not None else 0
+        if not df.empty:
+            row = df.iloc[0]
+            return {
+                "available_qty": int(row["quantity"]),
+                "storagelocation": row.get("storagelocation", "-"),
+                "expirationdate": str(row.get("expirationdate", "-"))
+            }
+        else:
+            return {"available_qty": 0, "storagelocation": "-", "expirationdate": "-"}
 
     def move_layer(self, *, itemid, expiration, qty, cost, locid, by):
         self.execute_command("""
@@ -100,7 +109,7 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (Max refill = available in inventory)")
+st.title("📤 Low-Stock Items Map (With Inventory Info)")
 
 low_items = handler.get_low_stock_items()
 if low_items.empty:
@@ -124,6 +133,10 @@ st.markdown("""
 for r in low_items.itertuples():
     layer = handler.get_first_layer(r.itemid)
     if not layer: continue
+    invinfo = handler.get_inventory_info(r.itemid)
+    available_in_inventory = invinfo["available_qty"]
+    storagelocation = invinfo["storagelocation"]
+    inv_expdate = invinfo["expirationdate"]
     locid = getattr(r, "locid", layer.get("locid",""))
     barcode = getattr(r, "barcode", "-")
     itemname = getattr(r, "itemname", "-")
@@ -131,7 +144,6 @@ for r in low_items.itertuples():
     shelfthreshold = int(getattr(r, "shelfthreshold", 1))
     current_qty = int(getattr(r, "shelfqty", 0))
     shelf_current_qty = int(getattr(r, "shelf_current_qty", layer.get("quantity", 0)))
-    available_in_inventory = handler.get_available_inventory(r.itemid)
     suggested = int(shelfavg - current_qty) if shelfavg > current_qty else 1
     suggested = max(suggested, 1)
     max_refill = max(available_in_inventory, 1)
@@ -147,18 +159,23 @@ for r in low_items.itertuples():
         f" &nbsp; - <b>shelfaverage</b>: <code>{shelfavg}</code><br>"
         f" &nbsp; - <b>shelfthreshold</b>: <code>{shelfthreshold}</code><br>"
         f" &nbsp; - <b>barcode</b>: <code>{barcode}</code><br>"
-        f" <b>From inventory table</b>:<br>"
+        f"<b>From inventory table</b>:<br>"
         f" &nbsp; - <b>available_in_inventory</b>: <code>{available_in_inventory}</code><br>"
+        f" &nbsp; - <b>storagelocation</b>: <code>{storagelocation}</code><br>"
+        f" &nbsp; - <b>expirationdate</b>: <code>{inv_expdate}</code><br>"
         f"<b>Suggested refill (prefill):</b> {suggested}<br>"
         f"<b>Max allowed (inventory):</b> {max_refill}<br>"
         "</div>"
     )
     qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
     c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
-    c1.markdown(f"<div class='item-card'><b>{itemname}</b><br>"
-                f"📦 {current_qty} (avg: {shelfavg}, thr: {shelfthreshold}) | 🗺️ {locid}<br>"
-                f"🔖 <span style='font-family:monospace'>{barcode}</span>"
-                f"{debug_text}</div>",unsafe_allow_html=True)
+    c1.markdown(
+        f"<div class='item-card'><b>{itemname}</b><br>"
+        f"📦 {current_qty} (avg: {shelfavg}, thr: {shelfthreshold}) | 🗺️ {locid}<br>"
+        f"🔖 <span style='font-family:monospace'>{barcode}</span><br>"
+        f"🏬 <b>Storage:</b> {storagelocation}<br>"
+        f"⏳ <b>Exp:</b> {inv_expdate}"
+        f"{debug_text}</div>", unsafe_allow_html=True)
     qty = c2.number_input(
         "", min_value=1, max_value=max_refill,
         value=suggested if suggested <= max_refill else max_refill, step=1,
