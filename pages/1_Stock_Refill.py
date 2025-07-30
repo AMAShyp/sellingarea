@@ -142,7 +142,7 @@ st.markdown("""
 .scan-btn button{background:#FFB300!important;color:#252a2c!important;font-weight:bold;border-radius:.35em!important;}
 .refill-btn button{background:#1abc9c!important;color:#fff!important;font-weight:bold;
                    border-radius:.45rem!important;padding:.15rem .57rem!important;margin-top:.03rem}
-</style>""",unsafe_allow_html=True)
+</style>""", unsafe_allow_html=True)
 
 if QR_AVAILABLE:
     if "scan_states" not in st.session_state:
@@ -175,13 +175,14 @@ for r in low_items.itertuples():
             f"<div class='inv-batch'>{qty} units &nbsp;|&nbsp; {storloc} &nbsp;|&nbsp; {exp}</div>"
         )
 
-    # --- barcode scan per item ---
     scan_key = f"scan_{r.itemid}"
     input_key = f"barcode_input_{r.itemid}"
-    show_scan = st.session_state.get("scan_states", {}).get(r.itemid, False)
+    cam_key = f"barcode_cam_{r.itemid}"
+    scan_states = st.session_state.setdefault("scan_states", {})
+    show_scan = scan_states.get(r.itemid, False)
 
     with st.container():
-        c1,c2,c3,c4 = st.columns([3,0.9,2,1.3])
+        c1, c2, c3, c4 = st.columns([3, 0.9, 2, 1.3])
         c1.markdown(
             f"<div class='item-card'><b>{itemname}</b><br>"
             f"📦 {current_qty} (avg: {shelfavg}, thr: {shelfthreshold}) | 🗺️ {locid}<br>"
@@ -197,20 +198,26 @@ for r in low_items.itertuples():
             value=suggested if suggested <= max_refill else max_refill, step=1,
             key=f"qty_{r.itemid}", label_visibility="collapsed"
         )
-        if show_scan and QR_AVAILABLE:
-            scanned = qrcode_scanner(key=f"barcode_cam_{r.itemid}")
-            if scanned:
-                st.session_state[input_key] = scanned
-                st.session_state["scan_states"][r.itemid] = False  # auto-close scan box after successful scan
-                st.success(f"Scanned: {scanned}")
+
+        # Scan button per row
         bc_col = c3
-        barcode_val = bc_col.text_input("", key=input_key, placeholder="Type or scan...", label_visibility="collapsed")
-        ok = barcode_val.strip() == barcode
         if QR_AVAILABLE:
             scan_btn = c4.button("📷 Scan", key=f"btn_scan_{r.itemid}", help="Scan barcode with camera", type="secondary")
             if scan_btn:
-                st.session_state["scan_states"][r.itemid] = not show_scan
-                st.experimental_rerun()
+                scan_states[r.itemid] = not show_scan
+                st.session_state["scan_states"] = scan_states
+                st.rerun()
+            # Show camera if toggled
+            if show_scan:
+                st.markdown("<div class='scan-hint'>Aim barcode for this item at the camera below.</div>", unsafe_allow_html=True)
+                scanned = qrcode_scanner(key=cam_key) or ""
+                if scanned:
+                    st.session_state[input_key] = scanned
+                    scan_states[r.itemid] = False
+                    st.session_state["scan_states"] = scan_states
+                    st.rerun()
+        barcode_val = bc_col.text_input("", key=input_key, placeholder="Type or scan...", label_visibility="collapsed")
+        ok = barcode_val.strip() == barcode
         if barcode_val:
             bc_col.markdown(f"<span class='{ 'good' if ok else 'bad'}'>{'✅' if ok else '❌'}</span>", unsafe_allow_html=True)
         fire = c4.button("🚚", key=f"btn_refill_{r.itemid}", disabled=not ok, type="primary")
