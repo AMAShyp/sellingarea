@@ -136,3 +136,4 @@ for r in low_items.itertuples():
                            qty=int(qty),cost=layer["cost_per_unit"],locid=locid,
                            by=st.session_state.get("user_email","AutoTransfer"))
         st.success(f"✅ {r.itemname} → {qty} to {locid}"); st.rerun()
+
