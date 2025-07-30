@@ -1,7 +1,7 @@
 import streamlit as st
 from db_handler import DatabaseManager
 
-# ──────────────────────────── DB Handler ────────────────────────────
+# ───── Handler ─────
 class BarcodeShelfHandler(DatabaseManager):
     def get_low_stock_items(self, threshold=10, limit=10):
         return self.fetch_data(
@@ -21,7 +21,7 @@ class BarcodeShelfHandler(DatabaseManager):
             (threshold, limit),
         )
 
-    def get_first_expiry_for_item(self, itemid: int):
+    def get_first_expiry_for_item(self, itemid):
         df = self.fetch_data(
             """
             SELECT expirationdate, quantity, cost_per_unit, locid
@@ -34,9 +34,8 @@ class BarcodeShelfHandler(DatabaseManager):
         )
         return df.iloc[0].to_dict() if not df.empty else {}
 
-    def move_layer(
-        self, *, itemid, expiration, qty, cost, locid, by
-    ):
+    def move_layer(self, *, itemid, expiration, qty, cost, locid, by):
+        # decrement inventory
         self.execute_command(
             """
             UPDATE inventory
@@ -46,175 +45,139 @@ class BarcodeShelfHandler(DatabaseManager):
             """,
             (qty, itemid, expiration, cost, qty),
         )
+        # add to shelf
         self.execute_command(
             """
             INSERT INTO shelf (itemid, expirationdate, quantity, cost_per_unit, locid)
             VALUES (%s,%s,%s,%s,%s)
             ON CONFLICT (itemid, expirationdate, cost_per_unit, locid)
-            DO UPDATE SET quantity = shelf.quantity + EXCLUDED.quantity,
+            DO UPDATE SET quantity    = shelf.quantity + EXCLUDED.quantity,
                           lastupdated = CURRENT_TIMESTAMP
             """,
             (itemid, expiration, qty, cost, locid),
         )
+        # log entry
         self.execute_command(
             """
-            INSERT INTO shelfentries
-            (itemid, expirationdate, quantity, createdby, locid)
+            INSERT INTO shelfentries (itemid, expirationdate, quantity, createdby, locid)
             VALUES (%s,%s,%s,%s,%s)
             """,
             (itemid, expiration, qty, by, locid),
         )
 
-# ───────────────────────────── Styling ─────────────────────────────
-st.markdown(
-    """
+# ───── CSS Styling ─────
+st.markdown("""
 <style>
-.card-row {
-  display: flex;
-  align-items: center;
-  gap: 1.4rem;
-  padding: 1rem 1.4rem;
-  margin-bottom: 1.2rem;
-  border: 1.5px solid #E4EBEE;
-  border-radius: 0.9rem;
-  box-shadow: 0 2px 6px rgba(44,62,80,0.08);
-  background: #FCFEFF;
-}
-.card-row .name {
-  font-size: 1.15rem;
-  font-weight: 700;
-  color: #205072;
-  min-width: 250px;
-}
-.card-row .meta {
-  font-size: 0.94rem;
-  line-height: 1.35;
-  min-width: 170px;
-}
-.card-row .loc {
-  font-family: monospace;
-  background: #F4FAFA;
-  padding: 0.1rem 0.45rem;
-  border-radius: 0.45rem;
-}
-.quantity-box input {
-  font-size: 1.08rem !important;
-  font-weight: 600 !important;
-  border-radius: 0.6rem !important;
-  padding: 0.25rem 0.7rem !important;
-}
-.barcode-box input {
-  font-size: 1.02rem !important;
-  border-radius: 0.6rem !important;
-  padding: 0.3rem 0.8rem !important;
+.card-container {
+    background: #fefefe;
+    border: 1px solid #e0ecec;
+    border-radius: 1rem;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.05);
 }
 .refill-btn button {
-  font-size: 1.05rem !important;
-  font-weight: 600 !important;
-  padding: 0.45rem 1.7rem !important;
-  border-radius: 0.7rem !important;
-  background: linear-gradient(95deg,#1ABC9C 0%,#26d7aa 100%) !important;
-  color: #fff !important;
-  border: none !important;
+    width: 100%;
+    padding: 0.6em 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+    border-radius: 0.5rem;
+    background: linear-gradient(90deg, #1ABC9C, #3EE2B4);
+    color: white;
+    border: none;
 }
+.barcode-box input, .quantity-box input {
+    width: 100%;
+    padding: 0.4em 0.8em;
+    font-size: 1rem;
+    border: 1px solid #d5dbe2;
+    border-radius: 0.5rem;
+    background: #fafafa;
+}
+.confirmed { color: #008c4a; font-weight: 600; }
+.not-matched { color: #e74c3c; font-weight: 600; }
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
-# ──────────────────────────── Page ─────────────────────────────────
+# ───── Page ─────
 handler = BarcodeShelfHandler()
-
-st.subheader("📉 Low‑Stock Refill (Barcode Confirmation)")
+st.subheader("📤 Auto Transfer: Low Stock Items (Barcode Confirmation)")
 
 low_items = handler.get_low_stock_items(threshold=10, limit=10)
 if low_items.empty:
-    st.success("✅ All shelf quantities meet their thresholds.")
+    st.success("✅ No items at or below threshold 10.")
     st.stop()
 
 for _, row in low_items.iterrows():
-    layer = handler.get_first_expiry_for_item(row.itemid)
-    if not layer:
-        st.error(f"No shelf layer for {row.itemname}.")
+    expiry = handler.get_first_expiry_for_item(row["itemid"])
+    if not expiry:
+        st.error(f"No shelf layer for {row['itemname']}.")
         continue
 
-    need      = int(row.shelfthreshold) - int(row.shelfqty)
-    available = max(1, int(layer["quantity"]))
-    default_q = max(1, min(need, available))
+    # prepare values
+    shelfqty = int(row["shelfqty"])
+    threshold = int(row["shelfthreshold"])
+    needed = max(1, threshold - shelfqty)
+    avail = max(1, int(expiry["quantity"]))
+    default_qty = min(needed, avail)
 
-    qty_key   = f"qty_{row.itemid}"
-    bc_key    = f"bc_{row.itemid}"
-    btn_key   = f"btn_{row.itemid}"
-
-    # ── CARD ROW ─────────────────────────────────────────────
-    st.markdown('<div class="card-row">', unsafe_allow_html=True)
-
-    st.markdown(
-        f'<div class="name">🛒 {row.itemname}</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        f"""
-        <div class="meta">
-            <div>Barcode:&nbsp;<span style="font-family:monospace;">{row.barcode}</span></div>
-            <div>Shelf&nbsp;Qty:&nbsp;<b>{row.shelfqty}</b> / Thresh&nbsp;<b>{row.shelfthreshold}</b></div>
-            <div>Loc:&nbsp;<span class="loc">{layer.get('locid','')}</span></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
+    # card container
     with st.container():
-        qty = st.number_input(
-            "Qty",
-            min_value=1,
-            max_value=available,
-            value=default_q,
-            key=qty_key,
-            label_visibility="collapsed",
-            help=f"Available in back‑store: {available}",
-            format="%i",
-        )
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
 
-    with st.container():
-        bc_entered = st.text_input(
-            "Barcode",
-            value="",
-            key=bc_key,
-            label_visibility="collapsed",
-            placeholder="scan / type",
-        )
+        # Info row
+        info_cols = st.columns([3,2,2])
+        info_cols[0].markdown(f"**🛒 {row['itemname']}**  \nBarcode: `{row['barcode']}`")
+        info_cols[1].markdown(f"📦 Shelf: **{shelfqty}** / 🚦 Threshold: **{threshold}**")
+        info_cols[2].markdown(f"📍 Location: `{expiry.get('locid','')}`")
 
-    match = bc_entered.strip() == str(row.barcode)
+        st.markdown("<br>", unsafe_allow_html=True)
 
-    with st.container():
-        clicked = st.button(
-            "🚚 Refill",
-            key=btn_key,
-            disabled=not match,
-            type="primary",
-            help="Scan correct barcode to enable",
-        )
+        # Controls row: qty, barcode, refill
+        ctrl_cols = st.columns([2,3,2])
+        with st.container():
+            with st.column(0):
+                st.markdown("<div class='quantity-box'><b>Qty to refill:</b></div>", unsafe_allow_html=True)
+                qty = ctrl_cols[0].number_input(
+                    "",
+                    min_value=1,
+                    max_value=avail,
+                    value=default_qty,
+                    key=f"qty_{row['itemid']}",
+                    label_visibility="collapsed",
+                )
+            with st.column(1):
+                st.markdown("<div class='barcode-box'><b>Confirm Barcode:</b></div>", unsafe_allow_html=True)
+                bc = ctrl_cols[1].text_input(
+                    "",
+                    placeholder="Scan here...",
+                    key=f"bc_{row['itemid']}",
+                    label_visibility="collapsed",
+                )
+            with st.column(2):
+                disabled = bc.strip() != str(row["barcode"])
+                refill_clicked = ctrl_cols[2].button(
+                    "🚚 Refill",
+                    key=f"refill_{row['itemid']}",
+                    disabled=disabled,
+                )
+        # feedback
+        if bc:
+            msg = "<div class='confirmed'>✅ Barcode OK</div>" if not disabled else "<div class='not-matched'>❌ Barcode mismatch</div>"
+            st.markdown(msg, unsafe_allow_html=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)  # close card-row
+        # action
+        if refill_clicked:
+            user = st.session_state.get("user_email", "AutoTransfer")
+            handler.move_layer(
+                itemid=row["itemid"],
+                expiration=expiry["expirationdate"],
+                qty=int(qty),
+                cost=expiry["cost_per_unit"],
+                locid=expiry.get("locid",""),
+                by=user,
+            )
+            st.success(f"✅ {row['itemname']} refilled {qty} units to {expiry.get('locid','')}!")
+            st.rerun()
 
-    # Feedback + action
-    if bc_entered and not match:
-        st.error("Barcode does not match. Please scan the correct one.", icon="⚠️")
-    elif bc_entered and match:
-        st.success("Barcode confirmed ✔️")
-
-    if clicked:
-        handler.move_layer(
-            itemid=row.itemid,
-            expiration=layer["expirationdate"],
-            qty=int(qty),
-            cost=layer["cost_per_unit"],
-            locid=layer["locid"],
-            by=st.session_state.get("user_email", "AutoTransfer"),
-        )
-        st.success(
-            f"✅ {row.itemname} refilled by {qty} → shelf {layer['locid']}", icon="🎉"
-        )
-        st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
