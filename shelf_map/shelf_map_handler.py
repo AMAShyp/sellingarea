@@ -13,7 +13,7 @@ class ShelfMapHandler(DatabaseManager):
                    x_pct, y_pct,
                    w_pct, h_pct,
                    COALESCE(rotation_deg, 0) AS rotation_deg
-            FROM   shelf_map_locations
+            FROM   shelf_map_locations_2
             ORDER  BY locid;
         """
         return self.fetch_data(sql).to_dict("records")
