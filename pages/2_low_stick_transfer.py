@@ -1,13 +1,10 @@
 from datetime import date
-from typing import List, Dict, Any
 import pandas as pd
 import streamlit as st
 from db_handler import DatabaseManager
 
-# ────────────────────── DB helper ────────────────────────────────────
 class BarcodeShelfHandler(DatabaseManager):
     def get_all_shelf_items(self, limit=20):
-        """Show up to `limit` items on shelf with their total quantity and threshold, ordered by lowest stock."""
         return self.fetch_data(
             f"""
             SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode,
@@ -23,7 +20,7 @@ class BarcodeShelfHandler(DatabaseManager):
             """
         )
 
-    def get_low_stock_items(self, threshold=10, limit=10) -> pd.DataFrame:
+    def get_low_stock_items(self, threshold=10, limit=10):
         df = self.fetch_data(
             """
             SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode, 
@@ -42,7 +39,7 @@ class BarcodeShelfHandler(DatabaseManager):
         )
         return df
 
-    def get_first_expiry_for_item(self, itemid: int) -> Dict[str, Any]:
+    def get_first_expiry_for_item(self, itemid):
         df = self.fetch_data(
             """
             SELECT expirationdate, quantity, cost_per_unit
@@ -60,21 +57,23 @@ handler = BarcodeShelfHandler()
 def transfer_tab():
     st.subheader("📤 Auto Transfer: 10 Lowest Stock Items (Threshold < 10)")
 
-    # Always show a table of 20 lowest shelf quantities and thresholds for inspection:
+    # Show only 20 lowest-stock items (columns must exist!)
     all_items = handler.get_all_shelf_items(limit=20)
     st.markdown("#### 🗃️ 20 Shelf Items with Lowest Quantity (sorted by quantity)")
+    show_cols = [c for c in ["itemname", "shelfqty", "shelfthreshold", "barcode"] if c in all_items.columns]
     st.dataframe(
-        all_items[["itemname", "shelfqty", "shelfthreshold"]],
+        all_items[show_cols],
         use_container_width=True,
         hide_index=True,
     )
 
-    # 1. Auto-detect 10 lowest-stock items below threshold
+    # Show low stock candidates (may also lack barcode)
     low_items = handler.get_low_stock_items(threshold=10, limit=10)
     st.write("DEBUG: low_items shape", low_items.shape)
     st.markdown("#### 🛑 Low Stock Candidates (below threshold 10)")
+    show_low_cols = [c for c in ["itemname", "shelfqty", "shelfthreshold", "barcode"] if c in low_items.columns]
     st.dataframe(
-        low_items[["itemname", "shelfqty", "shelfthreshold", "barcode"]],
+        low_items[show_low_cols],
         use_container_width=True,
         hide_index=True,
     )
@@ -85,7 +84,7 @@ def transfer_tab():
 
     st.info("🔻 The following items are below threshold and ready for transfer:")
     st.dataframe(
-        low_items[["itemname", "shelfqty", "shelfthreshold", "barcode"]],
+        low_items[show_low_cols],
         use_container_width=True,
         hide_index=True,
     )
@@ -96,12 +95,12 @@ def transfer_tab():
         to_transfer = row["shelfthreshold"] - row["shelfqty"]
         expiry_layer = handler.get_first_expiry_for_item(row["itemid"])
         if not expiry_layer:
-            continue  # skip if no inventory layer
+            continue
         transfer_rows.append(
             {
-                "itemid": row["itemid"],
-                "itemname": row["itemname"],
-                "barcode": row["barcode"],
+                "itemid": row.get("itemid"),
+                "itemname": row.get("itemname"),
+                "barcode": row.get("barcode", ""),
                 "expirationdate": expiry_layer["expirationdate"],
                 "available_qty": expiry_layer["quantity"],
                 "cost": expiry_layer["cost_per_unit"],
@@ -109,7 +108,6 @@ def transfer_tab():
             }
         )
 
-    # Show and edit transfer quantities
     st.markdown("### Review and edit transfer quantities before confirming:")
     editable = pd.DataFrame(transfer_rows)
     if not editable.empty:
@@ -145,7 +143,6 @@ def transfer_tab():
                     st.error(e)
                 return
 
-            # Process transfers
             user = st.session_state.get("user_email", "AutoTransfer")
             for idx, row in editable.iterrows():
                 handler.move_layer(
@@ -161,5 +158,9 @@ def transfer_tab():
     else:
         st.info("No transfer candidates available at this time.")
 
-if __name__ == "__main__":
-    transfer_tab()
+# Do NOT run the tab in pages/! (Remove main block if using Streamlit's multipage)
+# if __name__ == "__main__":
+#     transfer_tab()
+
+# In pages/ use only:
+transfer_tab()
