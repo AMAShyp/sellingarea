@@ -3,6 +3,12 @@ from db_handler import DatabaseManager
 from shelf_map.shelf_map_handler import ShelfMapHandler
 import plotly.graph_objects as go
 
+try:
+    from streamlit_qrcode_scanner import qrcode_scanner
+    QR_AVAILABLE = True
+except ImportError:
+    QR_AVAILABLE = False
+
 class BarcodeShelfHandler(DatabaseManager):
     def get_low_stock_items(self, thr=10, limit=10):
         return self.fetch_data("""
@@ -28,14 +34,12 @@ class BarcodeShelfHandler(DatabaseManager):
         return df.iloc[0].to_dict() if not df.empty else {}
 
     def get_inventory_batches(self, itemid):
-        # Show all batches for the item with quantity > 0
         df = self.fetch_data("""
             SELECT quantity, storagelocation, expirationdate
             FROM inventory
             WHERE itemid=%s AND quantity > 0
             ORDER BY expirationdate ASC, quantity DESC
         """, (itemid,))
-        # List of dicts: quantity, storagelocation, expirationdate
         return df.to_dict("records") if not df.empty else []
 
     def get_inventory_total(self, itemid):
@@ -137,58 +141,96 @@ st.markdown("""
 .good{color:green;font-weight:bold;}.bad{color:#c00;font-weight:bold;}
 .refill-btn button{background:#1abc9c!important;color:#fff!important;font-weight:bold;
                    border-radius:.45rem!important;padding:.15rem .57rem!important;margin-top:.03rem}
+.scan-hint {font-size:1.15em;color:#087911;font-weight:600;background:#eafdff;padding:.13em .7em .12em .7em;border-radius:.45em;margin:.15em 0 .4em 0;text-align:center;}
 </style>""",unsafe_allow_html=True)
 
-for r in low_items.itertuples():
-    layer = handler.get_first_layer(r.itemid)
-    if not layer: continue
-    inv_batches = handler.get_inventory_batches(r.itemid)
-    available_in_inventory = handler.get_inventory_total(r.itemid)
-    locid = getattr(r, "locid", layer.get("locid",""))
-    barcode = getattr(r, "barcode", "-")
-    itemname = getattr(r, "itemname", "-")
-    shelfavg = float(getattr(r, "shelfaverage", 0) or 0)
-    shelfthreshold = int(getattr(r, "shelfthreshold", 1))
-    current_qty = int(getattr(r, "shelfqty", 0))
-    familycat = getattr(r, "familycat", "-")
-    sectioncat = getattr(r, "sectioncat", "-")
-    departmentcat = getattr(r, "departmentcat", "-")
-    classcat = getattr(r, "classcat", "-")
-    suggested = int(shelfavg - current_qty) if shelfavg > current_qty else 1
-    suggested = max(suggested, 1)
-    max_refill = max(available_in_inventory, 1)
-    # Render inventory batches as one line per batch
-    inv_batches_html = ""
-    for batch in inv_batches:
-        qty = batch.get("quantity", 0)
-        storloc = batch.get("storagelocation", "-")
-        exp = str(batch.get("expirationdate", "-"))
-        inv_batches_html += (
-            f"<div class='inv-batch'>{qty} units &nbsp;|&nbsp; {storloc} &nbsp;|&nbsp; {exp}</div>"
-        )
-    qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
-    c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
-    c1.markdown(
-        f"<div class='item-card'><b>{itemname}</b><br>"
-        f"📦 {current_qty} (avg: {shelfavg}, thr: {shelfthreshold}) | 🗺️ {locid}<br>"
-        f"🔖 <span style='font-family:monospace'>{barcode}</span><br>"
-        f"<b>Inventory batches:</b> {inv_batches_html if inv_batches else '<span style=\"color:#C61C1C;\">None in stock</span>'}<br>"
-        f"<div class='catline'><span class='cat-class'>Class:</span> <span class='cat-val'>{classcat}</span></div>"
-        f"<div class='catline'><span class='cat-dept'>Department:</span> <span class='cat-val'>{departmentcat}</span></div>"
-        f"<div class='catline'><span class='cat-sect'>Section:</span> <span class='cat-val'>{sectioncat}</span></div>"
-        f"<div class='catline'><span class='cat-family'>Family:</span> <span class='cat-val'>{familycat}</span></div>"
-        f"</div>", unsafe_allow_html=True)
-    qty = c2.number_input(
-        "", min_value=1, max_value=max_refill,
-        value=suggested if suggested <= max_refill else max_refill, step=1,
-        key=qk, label_visibility="collapsed"
-    )
-    bc  = c3.text_input("",key=bck,placeholder="scan",label_visibility="collapsed")
-    ok  = bc.strip()==barcode
-    if bc: c3.markdown(f"<span class='{ 'good' if ok else 'bad'}'>{'✅' if ok else '❌'}</span>",unsafe_allow_html=True)
-    fire=c4.button("🚚",key=btnk,disabled=not ok,type="primary")
-    if fire:
-        handler.move_layer(itemid=r.itemid,expiration=layer["expirationdate"],
-                           qty=int(qty),cost=layer["cost_per_unit"],locid=locid,
-                           by=st.session_state.get("user_email","AutoTransfer"))
-        st.success(f"✅ {itemname} → {qty} to {locid}"); st.rerun()
+tab1, tab2 = st.tabs(["📷 Scan barcode (camera)", "⌨️ Type/paste barcode"])
+
+def get_card(barcode):
+    # Renders a single item card (if barcode valid, else nothing)
+    for r in low_items.itertuples():
+        if barcode and barcode == getattr(r, "barcode", None):
+            layer = handler.get_first_layer(r.itemid)
+            if not layer: continue
+            inv_batches = handler.get_inventory_batches(r.itemid)
+            available_in_inventory = handler.get_inventory_total(r.itemid)
+            locid = getattr(r, "locid", layer.get("locid",""))
+            itemname = getattr(r, "itemname", "-")
+            shelfavg = float(getattr(r, "shelfaverage", 0) or 0)
+            shelfthreshold = int(getattr(r, "shelfthreshold", 1))
+            current_qty = int(getattr(r, "shelfqty", 0))
+            familycat = getattr(r, "familycat", "-")
+            sectioncat = getattr(r, "sectioncat", "-")
+            departmentcat = getattr(r, "departmentcat", "-")
+            classcat = getattr(r, "classcat", "-")
+            suggested = int(shelfavg - current_qty) if shelfavg > current_qty else 1
+            suggested = max(suggested, 1)
+            max_refill = max(available_in_inventory, 1)
+            inv_batches_html = ""
+            for batch in inv_batches:
+                qty = batch.get("quantity", 0)
+                storloc = batch.get("storagelocation", "-")
+                exp = str(batch.get("expirationdate", "-"))
+                inv_batches_html += (
+                    f"<div class='inv-batch'>{qty} units &nbsp;|&nbsp; {storloc} &nbsp;|&nbsp; {exp}</div>"
+                )
+            qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
+            c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
+            c1.markdown(
+                f"<div class='item-card'><b>{itemname}</b><br>"
+                f"📦 {current_qty} (avg: {shelfavg}, thr: {shelfthreshold}) | 🗺️ {locid}<br>"
+                f"🔖 <span style='font-family:monospace'>{barcode}</span><br>"
+                f"<b>Inventory batches:</b> {inv_batches_html if inv_batches else '<span style=\"color:#C61C1C;\">None in stock</span>'}<br>"
+                f"<div class='catline'><span class='cat-class'>Class:</span> <span class='cat-val'>{classcat}</span></div>"
+                f"<div class='catline'><span class='cat-dept'>Department:</span> <span class='cat-val'>{departmentcat}</span></div>"
+                f"<div class='catline'><span class='cat-sect'>Section:</span> <span class='cat-val'>{sectioncat}</span></div>"
+                f"<div class='catline'><span class='cat-family'>Family:</span> <span class='cat-val'>{familycat}</span></div>"
+                f"</div>", unsafe_allow_html=True)
+            qty = c2.number_input(
+                "", min_value=1, max_value=max_refill,
+                value=suggested if suggested <= max_refill else max_refill, step=1,
+                key=qk, label_visibility="collapsed"
+            )
+            bc  = c3.text_input("",key=bck,placeholder="scan",label_visibility="collapsed", value=barcode)
+            ok  = bc.strip()==barcode
+            if bc: c3.markdown(f"<span class='{ 'good' if ok else 'bad'}'>{'✅' if ok else '❌'}</span>",unsafe_allow_html=True)
+            fire=c4.button("🚚",key=btnk,disabled=not ok,type="primary")
+            if fire:
+                handler.move_layer(itemid=r.itemid,expiration=layer["expirationdate"],
+                                   qty=int(qty),cost=layer["cost_per_unit"],locid=locid,
+                                   by=st.session_state.get("user_email","AutoTransfer"))
+                st.success(f"✅ {itemname} → {qty} to {locid}"); st.rerun()
+            return True
+    return False
+
+def reset_scan():
+    for k in list(st.session_state.keys()):
+        if k.startswith("barcode_cam") or k.startswith("barcode_input"):
+            st.session_state.pop(k)
+
+with tab1:
+    barcode = ""
+    if QR_AVAILABLE:
+        st.markdown("<div class='scan-hint'>Aim the barcode at your phone or webcam for instant detection.<br>Hold steady and close to the lens.</div>", unsafe_allow_html=True)
+        barcode = qrcode_scanner(key="barcode_cam") or ""
+        if barcode:
+            st.success(f"Scanned: {barcode}")
+            found = get_card(barcode)
+            if found:
+                if st.button("🔄 New Scan", type="secondary"):
+                    reset_scan()
+                    st.rerun()
+            else:
+                st.error("Barcode scanned, but no matching low-stock item.")
+        else:
+            st.info("Camera ready. Show barcode to scan.")
+    else:
+        st.warning("Camera scanning not available. Please use tab 2 or `pip install streamlit-qrcode-scanner`.")
+
+with tab2:
+    barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
+    found = get_card(barcode)
+    if found:
+        if st.button("🔄 New Scan", type="secondary"):
+            reset_scan()
+            st.rerun()
