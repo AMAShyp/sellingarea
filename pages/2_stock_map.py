@@ -109,7 +109,7 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (With Categories and Inventory Info)")
+st.title("📤 Low-Stock Items Map (Categories Colored)")
 
 low_items = handler.get_low_stock_items()
 if low_items.empty:
@@ -122,13 +122,13 @@ st.plotly_chart(map_with_highlights(locs, hi_locs), use_container_width=True, ke
 
 st.markdown("""
 <style>
-.item-card{padding:0.22rem 0.39rem 0.32rem 0.39rem;border-radius:.6rem;background:#f7fcfa;
-           border:1px solid #c7ebe5;font-size:1.05em;margin-bottom:0;}
-.cat-wrap{margin-top:0.14em;margin-bottom:.03em;padding:.14em .5em .14em .5em;
-          background:linear-gradient(92deg,#f1f5fb 80%,#f7fcfa 100%);
-          border-radius:.55em;font-size:1em;}
-.cat-title{font-size:0.97em;color:#3888b2;font-weight:bold;margin-right:.24em;}
-.cat-line{margin:0 0 0.06em 0;}
+.item-card{padding:0.22rem 0.39rem 0.42rem 0.39rem;border-radius:.6rem;background:#f7fcfa;
+           border:1px solid #c7ebe5;font-size:1.06em;margin-bottom:0;}
+.catline{margin:0.08em 0 0.12em 0;font-size:1.07em;font-weight:500;}
+.cat-class{color:#FF8800;}
+.cat-dept{color:#11A47A;}
+.cat-sect{color:#009ABF;}
+.cat-family{color:#9C50C5;}
 .good{color:green;font-weight:bold;}.bad{color:#c00;font-weight:bold;}
 .refill-btn button{background:#1abc9c!important;color:#fff!important;font-weight:bold;
                    border-radius:.45rem!important;padding:.15rem .57rem!important;margin-top:.03rem}
@@ -163,12 +163,11 @@ for r in low_items.itertuples():
         f"🏬 <b>Storage:</b> {storagelocation}<br>"
         f"⏳ <b>Exp:</b> {inv_expdate}<br>"
         f"<b>Inventory available:</b> {available_in_inventory}<br>"
-        f"<div class='cat-wrap'>"
-        f"<div class='cat-line'><span class='cat-title'>Family:</span>{familycat} "
-        f"<span class='cat-title'>Section:</span>{sectioncat}</div>"
-        f"<div class='cat-line'><span class='cat-title'>Department:</span>{departmentcat} "
-        f"<span class='cat-title'>Class:</span>{classcat}</div>"
-        f"</div></div>", unsafe_allow_html=True)
+        f"<div class='catline'><span class='cat-class'><b>Class:</b> {classcat}</span></div>"
+        f"<div class='catline'><span class='cat-dept'><b>Department:</b> {departmentcat}</span></div>"
+        f"<div class='catline'><span class='cat-sect'><b>Section:</b> {sectioncat}</span></div>"
+        f"<div class='catline'><span class='cat-family'><b>Family:</b> {familycat}</span></div>"
+        f"</div>", unsafe_allow_html=True)
     qty = c2.number_input(
         "", min_value=1, max_value=max_refill,
         value=suggested if suggested <= max_refill else max_refill, step=1,
