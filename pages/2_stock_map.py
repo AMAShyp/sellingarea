@@ -27,22 +27,24 @@ class BarcodeShelfHandler(DatabaseManager):
         """, (itemid,))
         return df.iloc[0].to_dict() if not df.empty else {}
 
-    def get_inventory_info(self, itemid):
+    def get_inventory_batches(self, itemid):
+        # Show all batches for the item with quantity > 0
         df = self.fetch_data("""
             SELECT quantity, storagelocation, expirationdate
             FROM inventory
             WHERE itemid=%s AND quantity > 0
-            ORDER BY quantity DESC, expirationdate ASC LIMIT 1
+            ORDER BY expirationdate ASC, quantity DESC
         """, (itemid,))
-        if not df.empty:
-            row = df.iloc[0]
-            return {
-                "available_qty": int(row["quantity"]),
-                "storagelocation": row.get("storagelocation", "-"),
-                "expirationdate": str(row.get("expirationdate", "-"))
-            }
-        else:
-            return {"available_qty": 0, "storagelocation": "-", "expirationdate": "-"}
+        # List of dicts: quantity, storagelocation, expirationdate
+        return df.to_dict("records") if not df.empty else []
+
+    def get_inventory_total(self, itemid):
+        df = self.fetch_data("""
+            SELECT SUM(quantity) as total
+            FROM inventory
+            WHERE itemid=%s AND quantity > 0
+        """, (itemid,))
+        return int(df.iloc[0]['total']) if not df.empty and df.iloc[0]['total'] is not None else 0
 
     def move_layer(self, *, itemid, expiration, qty, cost, locid, by):
         self.execute_command("""
@@ -109,7 +111,7 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (Colorful Category Display)")
+st.title("📤 Low-Stock Items Map (All Inventory Batches Shown)")
 
 low_items = handler.get_low_stock_items()
 if low_items.empty:
@@ -130,6 +132,8 @@ st.markdown("""
 .cat-sect{color:#098A23;font-weight:bold;}
 .cat-family{color:#FF8800;font-weight:bold;}
 .cat-val{color:#222;}
+.inv-batch{background:#fff1e3;display:inline-block;margin:0.08em 0.3em 0.08em 0;padding:0.08em 0.65em 0.08em 0.65em;
+           border-radius:.45em;border:1px solid #f1d1aa;font-size:1.03em;}
 .good{color:green;font-weight:bold;}.bad{color:#c00;font-weight:bold;}
 .refill-btn button{background:#1abc9c!important;color:#fff!important;font-weight:bold;
                    border-radius:.45rem!important;padding:.15rem .57rem!important;margin-top:.03rem}
@@ -138,10 +142,8 @@ st.markdown("""
 for r in low_items.itertuples():
     layer = handler.get_first_layer(r.itemid)
     if not layer: continue
-    invinfo = handler.get_inventory_info(r.itemid)
-    available_in_inventory = invinfo["available_qty"]
-    storagelocation = invinfo["storagelocation"]
-    inv_expdate = invinfo["expirationdate"]
+    inv_batches = handler.get_inventory_batches(r.itemid)
+    available_in_inventory = handler.get_inventory_total(r.itemid)
     locid = getattr(r, "locid", layer.get("locid",""))
     barcode = getattr(r, "barcode", "-")
     itemname = getattr(r, "itemname", "-")
@@ -155,15 +157,22 @@ for r in low_items.itertuples():
     suggested = int(shelfavg - current_qty) if shelfavg > current_qty else 1
     suggested = max(suggested, 1)
     max_refill = max(available_in_inventory, 1)
+    # Render inventory batches as one line per batch
+    inv_batches_html = ""
+    for batch in inv_batches:
+        qty = batch.get("quantity", 0)
+        storloc = batch.get("storagelocation", "-")
+        exp = str(batch.get("expirationdate", "-"))
+        inv_batches_html += (
+            f"<div class='inv-batch'>{qty} units &nbsp;|&nbsp; {storloc} &nbsp;|&nbsp; {exp}</div>"
+        )
     qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
     c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
     c1.markdown(
         f"<div class='item-card'><b>{itemname}</b><br>"
         f"📦 {current_qty} (avg: {shelfavg}, thr: {shelfthreshold}) | 🗺️ {locid}<br>"
         f"🔖 <span style='font-family:monospace'>{barcode}</span><br>"
-        f"🏬 <b>Storage:</b> {storagelocation}<br>"
-        f"⏳ <b>Exp:</b> {inv_expdate}<br>"
-        f"<b>Inventory available:</b> {available_in_inventory}<br>"
+        f"<b>Inventory batches:</b> {inv_batches_html if inv_batches else '<span style=\"color:#C61C1C;\">None in stock</span>'}<br>"
         f"<div class='catline'><span class='cat-class'>Class:</span> <span class='cat-val'>{classcat}</span></div>"
         f"<div class='catline'><span class='cat-dept'>Department:</span> <span class='cat-val'>{departmentcat}</span></div>"
         f"<div class='catline'><span class='cat-sect'>Section:</span> <span class='cat-val'>{sectioncat}</span></div>"
