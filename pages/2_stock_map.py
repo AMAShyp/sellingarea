@@ -34,7 +34,7 @@ class BarcodeShelfHandler(DatabaseManager):
             INSERT INTO shelfentries(itemid,expirationdate,quantity,createdby,locid)
             VALUES (%s,%s,%s,%s,%s)""",(itemid,expiration,qty,by,locid))
 
-def map_with_highlights(locs, highlight_locs):
+def map_with_highlights(locs, highlight_locs, label_offset=0.018):
     import math
     shapes = []
     for row in locs:
@@ -63,34 +63,35 @@ def map_with_highlights(locs, highlight_locs):
                       plot_bgcolor="#f8f9fa")
     fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
-    # Only label shelves that are in highlight_locs
+    # Only label shelves that are in highlight_locs, and SHIFT the label up
     for row in locs:
         if row["locid"] in highlight_locs:
             x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
             fig.add_annotation(
-                x=x + w/2, y=1 - (y + h/2),
+                x=x + w/2,
+                y=1 - (y + h/2) + label_offset,  # shift label up
                 text=row.get("label",row["locid"]),
                 showarrow=False,
                 font=dict(size=11, color="#c90000", family="monospace"),
                 align="center",
-                bgcolor="rgba(255,255,255,0.8)",
+                bgcolor="rgba(255,255,255,0.92)",
                 bordercolor="#d8000c",
                 borderpad=2,
-                opacity=0.95,
+                opacity=0.97,
             )
     return fig
 
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (Red labels only on shelves to refill)")
+st.title("📤 Low-Stock Items Map (Only Red Labels Above Shelves To Refill)")
 low_items = handler.get_low_stock_items()
 if low_items.empty:
     st.success("✅ All items sufficiently stocked."); st.stop()
 locs = map_handler.get_locations()
 hi_locs = sorted({handler.get_first_layer(r.itemid).get("locid","") for r in low_items.itertuples() if handler.get_first_layer(r.itemid)})
 
-st.markdown("#### 🗺️ Red = shelves to refill")
+st.markdown("#### 🗺️ Red = shelves to refill; labels above each red shelf")
 st.plotly_chart(map_with_highlights(locs, hi_locs), use_container_width=True, key="main_map")
 
 st.markdown("""
