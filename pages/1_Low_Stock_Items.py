@@ -22,8 +22,16 @@ try:
         st.success("✅ No items are below the global threshold.")
     else:
         st.warning("⚠️ Items below global threshold in selling area:")
+        # Show relevant columns, renaming locid to Location
+        columns_to_show = [
+            "itemname", "locid", "shelfid", "itemid", "expirationdate",
+            "quantity", "lastupdated", "notes", "cost_per_unit"
+        ]
+        display_df = low_stock_df.copy()
+        display_df = display_df[columns_to_show]
+        display_df = display_df.rename(columns={"locid": "Location"})
         st.dataframe(
-            low_stock_df,
+            display_df,
             use_container_width=True,
             hide_index=True,
         )
@@ -51,23 +59,26 @@ try:
                 axis=1,
             )
 
+            # Optional: show location if it’s part of shelf_qty_df
+            columns_alerts = [
+                "itemname", "Location" if "locid" in alerts_df.columns else None,
+                "totalquantity", "shelfthreshold", "shelfaverage", "needed_for_average"
+            ]
+            # Remove None if locid not present
+            columns_alerts = [c for c in columns_alerts if c]
+            if "locid" in alerts_df.columns:
+                alerts_df = alerts_df.rename(columns={"locid": "Location"})
+
             st.warning("⚠️ Items below individual shelf thresholds:")
             st.dataframe(
-                alerts_df[
-                    [
-                        "itemname",
-                        "totalquantity",
-                        "shelfthreshold",
-                        "shelfaverage",
-                        "needed_for_average",
-                    ]
-                ],
+                alerts_df[columns_alerts],
                 use_container_width=True,
                 hide_index=True,
             )
 
             st.info(
                 "🔎 **Explanation**:\n"
+                "- **Location**: shelf/location ID\n"
                 "- **totalquantity**: current shelf quantity\n"
                 "- **shelfthreshold**: minimum required\n"
                 "- **shelfaverage**: desired shelf quantity\n"
