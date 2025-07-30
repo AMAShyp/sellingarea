@@ -109,6 +109,7 @@ st.markdown("""
 .good{color:green;font-weight:bold}.bad{color:#c00;font-weight:bold}
 .refill-btn button{background:#1abc9c!important;color:#fff!important;font-weight:bold;
                    border-radius:.45rem!important;padding:.15rem .57rem!important;margin-top:.03rem}
+.fullcard{color:#a15c00;background:#fdf6ed;border:1.5px dashed #f7b983;padding:0.25rem 0.55rem;border-radius:.55rem;font-size:1.02em}
 </style>""",unsafe_allow_html=True)
 
 for r in low_items.itertuples():
@@ -119,15 +120,19 @@ for r in low_items.itertuples():
     max_qty = int(getattr(r, "shelf_max_qty", layer.get("quantity", 0)))
     shelfthreshold = int(getattr(r, "shelfthreshold", 1))
     shelfavg = float(getattr(r, "shelfaverage", 0) or 0)
-    # Compute max allowed to refill
     max_refill = max(max_qty - current_qty, 0)
     min_input = max(1, shelfthreshold - current_qty)
-    # Compute suggested
     needed = int(shelfavg - current_qty) if shelfavg > current_qty else min_input
     suggested = max(needed, min_input)
-    # Don't allow default value to be > max_refill
     if max_refill < min_input:
-        st.warning(f"🟠 {r.itemname}: Shelf holds {current_qty}, cannot refill below threshold {shelfthreshold} (max: {max_qty})")
+        # Show as full/cannot refill, but disabled
+        c1, c2 = st.columns([3, 2])
+        c1.markdown(
+            f"<div class='fullcard'><b>{r.itemname}</b> — Shelf is FULL or at threshold.<br>"
+            f"📦 {current_qty} / {max_qty} (thr: {shelfthreshold}, avg: {shelfavg}) | 🗺️ {locid}<br>"
+            f"🔖 <span style='font-family:monospace'>{r.barcode}</span></div>",
+            unsafe_allow_html=True)
+        c2.button("✅ At Capacity", disabled=True, key=f"btn_full_{r.itemid}")
         continue
     if suggested > max_refill:
         suggested = max_refill
@@ -149,3 +154,4 @@ for r in low_items.itertuples():
                            qty=int(qty),cost=layer["cost_per_unit"],locid=locid,
                            by=st.session_state.get("user_email","AutoTransfer"))
         st.success(f"✅ {r.itemname} → {qty} to {locid}"); st.rerun()
+
