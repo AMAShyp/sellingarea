@@ -2,19 +2,14 @@ import streamlit as st
 from db_handler import DatabaseManager
 import plotly.graph_objects as go
 from PIL import Image
-import math
 
 # --- MAP HANDLER ---
 class ShelfMapHandler:
     def get_locations(self):
-        # Replace with your actual logic!
-        # Example:
-        # return [
-        #     {"locid": "r12g2", "x_pct": 0.30, "y_pct": 0.55, "w_pct": 0.10, "h_pct": 0.06, "rotation_deg": 0},
-        #     ...
-        # ]
-        return []
-
+        # Replace with your real loader/DB logic
+        return [
+            # Example: {"locid": "r12g2", "x_pct": 0.30, "y_pct": 0.55, "w_pct": 0.10, "h_pct": 0.06, "rotation_deg": 0}
+        ]
     def get_png_path(self):
         return "assets/shelf_map.png"
 
@@ -31,12 +26,12 @@ def _img_ratio(path: str) -> float:
 @st.cache_data(ttl=3600)
 def load_locations(_handler):
     return _handler.get_locations()
-
 @st.cache_resource
 def load_bg(_handler):
     return Image.open(_handler.get_png_path())
 
-def shelf_map_with_highlights(locs, highlight_locs, img, png_ratio):
+def map_with_highlights(locs, highlight_locs, img, png_ratio):
+    import math
     shapes = []
     for row in locs:
         x, y, w, h = float(row["x_pct"]), float(row["y_pct"]), float(row["w_pct"]), float(row["h_pct"])
@@ -44,8 +39,8 @@ def shelf_map_with_highlights(locs, highlight_locs, img, png_ratio):
         cx = x + w/2
         cy = 1 - (y + h/2)
         y_draw = 1 - y - h
-        is_hi = row["locid"] in highlight_locs
-        fill = "rgba(26,188,156,0.10)" if not is_hi else "rgba(255,128,0,0.30)"
+        is_hi = row["locid"] in highlight_locs if highlight_locs else False
+        fill = "rgba(26,188,156,0.09)" if not is_hi else "rgba(255,128,0,0.22)"
         line = dict(width=2 if is_hi else 1, color="#FF8000" if is_hi else "#1ABC9C")
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
@@ -56,7 +51,7 @@ def shelf_map_with_highlights(locs, highlight_locs, img, png_ratio):
             path = "M " + " L ".join(f"{cx+u*cos-v*sin},{cy+u*sin+v*cos}" for u, v in pts) + " Z"
             shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
         if is_hi:
-            r = max(w, h) * 0.60
+            r = max(w, h) * 0.55
             shapes.append(dict(type="circle", xref="x", yref="y",
                                x0=cx - r, x1=cx + r, y0=cy - r, y1=cy + r,
                                line=dict(color="#FF8000", width=2, dash="dot")))
@@ -66,7 +61,7 @@ def shelf_map_with_highlights(locs, highlight_locs, img, png_ratio):
             source=img, xref="x", yref="y",
             x=0, y=1, sizex=1, sizey=1,
             xanchor="left", yanchor="top", layer="below"))
-    fig.update_layout(shapes=shapes, height=250, margin=dict(l=5,r=5,t=5,b=5))
+    fig.update_layout(shapes=shapes, height=340, margin=dict(l=12,r=12,t=10,b=5))
     fig.update_xaxes(visible=False, range=[0,1], constrain="domain")
     fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=png_ratio)
     fig.update_traces(hoverinfo="skip", selector=dict(type="scatter"))
@@ -133,7 +128,7 @@ handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 
 st.set_page_config(layout="wide")
-st.title("📤 Auto Refill: Low-Stock Items + Shelf Location Map")
+st.title("📤 Auto Refill: Low-Stock Items + Shelf Map")
 
 low_items = handler.get_low_stock_items(threshold=10, limit=10)
 if low_items.empty:
@@ -144,39 +139,31 @@ locs = load_locations(map_handler)
 bg_img = load_bg(map_handler)
 img_ratio = _img_ratio(map_handler.get_png_path())
 
-# -- highlight all low-stock shelf locids
+# --- Find all locations to highlight ---
 highlight_locs = []
+item_locids = []
 for idx, row in low_items.iterrows():
     expiry_layer = handler.get_first_expiry_for_item(row["itemid"])
     if expiry_layer and expiry_layer.get("locid"):
-        highlight_locs.append(expiry_layer.get("locid"))
-highlight_locs = list(set(highlight_locs))
+        highlight_locs.append(expiry_layer["locid"])
+        item_locids.append(expiry_layer["locid"])
+highlight_locs = list(sorted(set(highlight_locs)))
 
-# --- Show single map with all low-stock items highlighted
-if locs and highlight_locs:
-    fig = shelf_map_with_highlights(locs, highlight_locs, bg_img, img_ratio)
-    st.plotly_chart(fig, use_container_width=True, key="main_map")
+# --- Render MAP (one map for all) ---
+fig = map_with_highlights(locs, highlight_locs, bg_img, img_ratio)
+st.markdown("#### 🗺️ Shelves with items to refill are highlighted below:")
+st.plotly_chart(fig, use_container_width=True, key="main_map")
 
+# --- List items below the map ---
 st.markdown("""
 <style>
-.item-card {
-    padding: 0.32rem 0.52rem;
-    border-radius: 0.7rem;
-    background: #f8fdfc;
-    border: 1px solid #c7ebe5;
-    font-size: 1.04em;
-    margin-bottom: 0;
-}
-.success-text { color: green; font-weight: bold; margin-top: 0.1em; }
-.error-text { color: #cc3300; font-weight: bold; margin-top: 0.1em; }
+.item-card {padding:0.29rem 0.4rem;border-radius:0.7rem;background:#f8fdfc;
+            border:1px solid #c7ebe5;font-size:1.04em;margin-bottom:0;}
+.success-text { color: green; font-weight: bold; margin-top: 0.1em;}
+.error-text { color: #cc3300; font-weight: bold; margin-top: 0.1em;}
 .refill-btn button {
-    background-color: #1ABC9C !important;
-    color: white !important;
-    font-weight: bold;
-    border-radius: 0.5rem !important;
-    padding: 0.21rem 0.7rem !important;
-    margin-top: 0.1em;
-}
+    background-color:#1ABC9C!important;color:white!important;font-weight:bold;
+    border-radius:0.5rem!important;padding:0.21rem 0.7rem!important;margin-top:0.1em;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -196,7 +183,7 @@ for idx, row in low_items.iterrows():
     barcode_key = f"barcode_{row['itemid']}"
     button_key = f"refill_{row['itemid']}"
 
-    cols = st.columns([2.7, 1, 1.7, 0.8])
+    cols = st.columns([2.9, 0.9, 2, 0.7])
     cols[0].markdown(
         f"<div class='item-card'><b>{row['itemname']}</b><br>"
         f"📦 Shelf: {shelfqty}/{shelfthreshold} | 🗺️ {locid}<br>"
