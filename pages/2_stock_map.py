@@ -2,14 +2,19 @@ import streamlit as st
 from db_handler import DatabaseManager
 import plotly.graph_objects as go
 from PIL import Image
+import math
 
 # --- MAP HANDLER ---
 class ShelfMapHandler:
     def get_locations(self):
-        # Replace this with actual loader/DB logic
-        return [
-            # Example: {"locid": "r12g2", "x_pct": 0.30, "y_pct": 0.55, "w_pct": 0.10, "h_pct": 0.06, "rotation_deg": 0}
-        ]
+        # Replace with your actual logic!
+        # Example:
+        # return [
+        #     {"locid": "r12g2", "x_pct": 0.30, "y_pct": 0.55, "w_pct": 0.10, "h_pct": 0.06, "rotation_deg": 0},
+        #     ...
+        # ]
+        return []
+
     def get_png_path(self):
         return "assets/shelf_map.png"
 
@@ -31,8 +36,7 @@ def load_locations(_handler):
 def load_bg(_handler):
     return Image.open(_handler.get_png_path())
 
-def shelf_map_for_loc(locid, locs, img, png_ratio):
-    import math
+def shelf_map_with_highlights(locs, highlight_locs, img, png_ratio):
     shapes = []
     for row in locs:
         x, y, w, h = float(row["x_pct"]), float(row["y_pct"]), float(row["w_pct"]), float(row["h_pct"])
@@ -40,8 +44,8 @@ def shelf_map_for_loc(locid, locs, img, png_ratio):
         cx = x + w/2
         cy = 1 - (y + h/2)
         y_draw = 1 - y - h
-        is_hi = row["locid"] == locid
-        fill = "rgba(26,188,156,0.09)" if not is_hi else "rgba(255,128,0,0.20)"
+        is_hi = row["locid"] in highlight_locs
+        fill = "rgba(26,188,156,0.10)" if not is_hi else "rgba(255,128,0,0.30)"
         line = dict(width=2 if is_hi else 1, color="#FF8000" if is_hi else "#1ABC9C")
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
@@ -62,7 +66,7 @@ def shelf_map_for_loc(locid, locs, img, png_ratio):
             source=img, xref="x", yref="y",
             x=0, y=1, sizex=1, sizey=1,
             xanchor="left", yanchor="top", layer="below"))
-    fig.update_layout(shapes=shapes, height=160, margin=dict(l=5,r=5,t=5,b=5))
+    fig.update_layout(shapes=shapes, height=250, margin=dict(l=5,r=5,t=5,b=5))
     fig.update_xaxes(visible=False, range=[0,1], constrain="domain")
     fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=png_ratio)
     fig.update_traces(hoverinfo="skip", selector=dict(type="scatter"))
@@ -140,6 +144,19 @@ locs = load_locations(map_handler)
 bg_img = load_bg(map_handler)
 img_ratio = _img_ratio(map_handler.get_png_path())
 
+# -- highlight all low-stock shelf locids
+highlight_locs = []
+for idx, row in low_items.iterrows():
+    expiry_layer = handler.get_first_expiry_for_item(row["itemid"])
+    if expiry_layer and expiry_layer.get("locid"):
+        highlight_locs.append(expiry_layer.get("locid"))
+highlight_locs = list(set(highlight_locs))
+
+# --- Show single map with all low-stock items highlighted
+if locs and highlight_locs:
+    fig = shelf_map_with_highlights(locs, highlight_locs, bg_img, img_ratio)
+    st.plotly_chart(fig, use_container_width=True, key="main_map")
+
 st.markdown("""
 <style>
 .item-card {
@@ -179,26 +196,21 @@ for idx, row in low_items.iterrows():
     barcode_key = f"barcode_{row['itemid']}"
     button_key = f"refill_{row['itemid']}"
 
-    cols = st.columns([1.07, 2.95, 1, 1.55, 0.7])
-    if locid:
-        fig = shelf_map_for_loc(locid, locs, bg_img, img_ratio)
-        cols[0].plotly_chart(fig, use_container_width=True, key=f"map_{row['itemid']}")
-    else:
-        cols[0].info("No location", icon="🗺️")
-    cols[1].markdown(
+    cols = st.columns([2.7, 1, 1.7, 0.8])
+    cols[0].markdown(
         f"<div class='item-card'><b>{row['itemname']}</b><br>"
         f"📦 Shelf: {shelfqty}/{shelfthreshold} | 🗺️ {locid}<br>"
         f"<span style='font-size:0.95em;'>🔖 <span style='font-family:monospace;'>{row['barcode']}</span></span></div>",
         unsafe_allow_html=True)
-    qty = cols[2].number_input("Qty", 1, avail_qty, suggested_qty, key=qty_key, label_visibility="collapsed")
-    barcode_input = cols[3].text_input("Barcode", key=barcode_key, placeholder="Scan barcode...", label_visibility="collapsed")
+    qty = cols[1].number_input("Qty", 1, avail_qty, suggested_qty, key=qty_key, label_visibility="collapsed")
+    barcode_input = cols[2].text_input("Barcode", key=barcode_key, placeholder="Scan barcode...", label_visibility="collapsed")
     barcode_correct = barcode_input.strip() == row["barcode"]
     if barcode_input:
         if barcode_correct:
-            cols[3].markdown("<div class='success-text'>✅</div>", unsafe_allow_html=True)
+            cols[2].markdown("<div class='success-text'>✅</div>", unsafe_allow_html=True)
         else:
-            cols[3].markdown("<div class='error-text'>❌</div>", unsafe_allow_html=True)
-    refill_clicked = cols[4].button("🚚", key=button_key, disabled=not barcode_correct, help="Refill", type="primary")
+            cols[2].markdown("<div class='error-text'>❌</div>", unsafe_allow_html=True)
+    refill_clicked = cols[3].button("🚚", key=button_key, disabled=not barcode_correct, help="Refill", type="primary")
     if refill_clicked:
         user = st.session_state.get("user_email", "AutoTransfer")
         handler.move_layer(
