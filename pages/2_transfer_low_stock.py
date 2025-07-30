@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from selling_area.shelf_handler import ShelfHandler
-from selling_area.transfer import BarcodeShelfHandler, layers_for_barcode, all_locids
+from pages.transfer import BarcodeShelfHandler, layers_for_barcode, all_locids
 
 st.set_page_config(page_title="Low Stock Transfer", layout="wide")
 
