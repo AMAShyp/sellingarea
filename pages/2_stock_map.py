@@ -34,7 +34,7 @@ class BarcodeShelfHandler(DatabaseManager):
             INSERT INTO shelfentries(itemid,expirationdate,quantity,createdby,locid)
             VALUES (%s,%s,%s,%s,%s)""",(itemid,expiration,qty,by,locid))
 
-def map_with_highlights(locs, highlight_locs, label_offset=0.1):
+def map_with_highlights(locs, highlight_locs, label_offset=0.05):
     import math
     shapes = []
     for row in locs:
