@@ -68,18 +68,9 @@ handler = BarcodeShelfHandler()
 st.subheader("📤 Auto Transfer: Low Stock Items (Barcode Confirmation Required)")
 
 low_items = handler.get_low_stock_items(threshold=10, limit=10)
-show_cols = [c for c in ["itemname", "shelfqty", "shelfthreshold", "barcode"] if c in low_items.columns]
-
-st.markdown("#### 🛑 Low Stock Candidates (at or below threshold 10)")
 if low_items.empty:
     st.success("✅ No items are currently at or below threshold 10.")
     st.stop()
-
-st.dataframe(
-    low_items[show_cols],
-    use_container_width=True,
-    hide_index=True,
-)
 
 for idx, row in low_items.iterrows():
     st.markdown("---")
@@ -117,7 +108,6 @@ for idx, row in low_items.iterrows():
 
     btn_disabled = (barcode_entry.strip() != str(row["barcode"]))
 
-    # Button enabled only if barcode matches
     if col5.button(
         "🚚 Refill",
         key=f"refill_{row['itemid']}",
@@ -136,9 +126,8 @@ for idx, row in low_items.iterrows():
         st.success(f"✅ {row['itemname']} refilled with {qty} units to {expiry_layer.get('locid','')}!")
         st.rerun()
 
-    # Visual hint
+    # Visual feedback
     if barcode_entry and btn_disabled:
         col4.error("❌ Barcode does not match.")
     elif barcode_entry and not btn_disabled:
         col4.success("✅ Barcode confirmed.")
-
