@@ -7,6 +7,7 @@ class BarcodeShelfHandler(DatabaseManager):
     def get_low_stock_items(self, thr=10, limit=10):
         return self.fetch_data("""
             SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode,
+                   i.familycat, i.sectioncat, i.departmentcat, i.classcat,
                    s.totalquantity AS shelfqty,
                    i.shelfthreshold, i.shelfaverage,
                    s2.locid, s2.quantity as shelf_current_qty
@@ -108,7 +109,7 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (With Inventory Info)")
+st.title("📤 Low-Stock Items Map (With All Item Categories and Inventory Info)")
 
 low_items = handler.get_low_stock_items()
 if low_items.empty:
@@ -126,6 +127,7 @@ st.markdown("""
 .good{color:green;font-weight:bold}.bad{color:#c00;font-weight:bold}
 .refill-btn button{background:#1abc9c!important;color:#fff!important;font-weight:bold;
                    border-radius:.45rem!important;padding:.15rem .57rem!important;margin-top:.03rem}
+.cat-box{margin-top:.14em;padding:.07em .5em .07em .5em;font-size:0.97em;border-radius:.5em;background:#f3f6fa;}
 </style>""",unsafe_allow_html=True)
 
 for r in low_items.itertuples():
@@ -141,6 +143,10 @@ for r in low_items.itertuples():
     shelfavg = float(getattr(r, "shelfaverage", 0) or 0)
     shelfthreshold = int(getattr(r, "shelfthreshold", 1))
     current_qty = int(getattr(r, "shelfqty", 0))
+    familycat = getattr(r, "familycat", "-")
+    sectioncat = getattr(r, "sectioncat", "-")
+    departmentcat = getattr(r, "departmentcat", "-")
+    classcat = getattr(r, "classcat", "-")
     suggested = int(shelfavg - current_qty) if shelfavg > current_qty else 1
     suggested = max(suggested, 1)
     max_refill = max(available_in_inventory, 1)
@@ -152,7 +158,9 @@ for r in low_items.itertuples():
         f"🔖 <span style='font-family:monospace'>{barcode}</span><br>"
         f"🏬 <b>Storage:</b> {storagelocation}<br>"
         f"⏳ <b>Exp:</b> {inv_expdate}<br>"
-        f"<b>Inventory available:</b> {available_in_inventory}"
+        f"<b>Inventory available:</b> {available_in_inventory}<br>"
+        f"<div class='cat-box'><b>Family:</b> {familycat} | <b>Section:</b> {sectioncat}<br>"
+        f"<b>Department:</b> {departmentcat} | <b>Class:</b> {classcat}</div>"
         f"</div>", unsafe_allow_html=True)
     qty = c2.number_input(
         "", min_value=1, max_value=max_refill,
