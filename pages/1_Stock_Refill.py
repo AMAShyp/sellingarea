@@ -66,13 +66,57 @@ class BarcodeShelfHandler(DatabaseManager):
             VALUES (%s,%s,%s,%s,%s)
         """, (itemid, expiration, qty, by, locid))
 
-# ... [map_with_highlights unchanged]
+def map_with_highlights(locs, highlight_locs, label_offset=0.018):
+    import math
+    shapes = []
+    for row in locs:
+        x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
+        deg = float(row.get("rotation_deg") or 0)
+        cx, cy = x + w/2, 1 - (y + h/2)
+        y_draw = 1 - y - h
+        is_hi = row["locid"] in highlight_locs
+        fill = "rgba(220,53,69,0.34)" if is_hi else "rgba(180,180,180,0.11)"
+        line = dict(width=2 if is_hi else 1.2, color="#d8000c" if is_hi else "#888")
+        if deg == 0:
+            shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
+        else:
+            rad = math.radians(deg)
+            cos, sin = math.cos(rad), math.sin(rad)
+            pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
+            path = "M " + " L ".join(f"{cx+u*cos-v*sin},{cy+u*sin+v*cos}" for u, v in pts) + " Z"
+            shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
+        if is_hi:
+            r = max(w, h) * 0.5
+            shapes.append(dict(type="circle",xref="x",yref="y",
+                               x0=cx-r,x1=cx+r,y0=cy-r,y1=cy+r,
+                               line=dict(color="#d8000c",width=2,dash="dot")))
+    fig = go.Figure()
+    fig.update_layout(shapes=shapes, height=340, margin=dict(l=12,r=12,t=10,b=5),
+                      plot_bgcolor="#f8f9fa")
+    fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
+    fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
+    for row in locs:
+        if row["locid"] in highlight_locs:
+            x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
+            fig.add_annotation(
+                x=x + w/2,
+                y=1 - (y + h/2) + label_offset,
+                text=row.get("label",row["locid"]),
+                showarrow=False,
+                font=dict(size=11, color="#c90000", family="monospace"),
+                align="center",
+                bgcolor="rgba(255,255,255,0.92)",
+                bordercolor="#d8000c",
+                borderpad=2,
+                opacity=0.97,
+            )
+    return fig
+
+st.set_page_config(layout="wide")
+st.title("📤 Low-Stock Items Map (All Inventory Batches Shown)")
 
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
-st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (Each Card: Scan to Fill Barcode)")
-
 low_items = handler.get_low_stock_items()
 if low_items.empty:
     st.success("✅ All items sufficiently stocked."); st.stop()
@@ -95,16 +139,16 @@ st.markdown("""
 .inv-batch{background:#fff1e3;display:inline-block;margin:0.08em 0.3em 0.08em 0;padding:0.08em 0.65em 0.08em 0.65em;
            border-radius:.45em;border:1px solid #f1d1aa;font-size:1.03em;}
 .good{color:green;font-weight:bold;}.bad{color:#c00;font-weight:bold;}
+.scan-btn button{background:#FFB300!important;color:#252a2c!important;font-weight:bold;border-radius:.35em!important;}
 .refill-btn button{background:#1abc9c!important;color:#fff!important;font-weight:bold;
                    border-radius:.45rem!important;padding:.15rem .57rem!important;margin-top:.03rem}
-</style>""", unsafe_allow_html=True)
+</style>""",unsafe_allow_html=True)
 
-if "scan_row" not in st.session_state:
-    st.session_state.scan_row = None
-if "barcode_scan_value" not in st.session_state:
-    st.session_state.barcode_scan_value = {}
+if QR_AVAILABLE:
+    if "scan_states" not in st.session_state:
+        st.session_state["scan_states"] = {}
 
-for idx, r in enumerate(low_items.itertuples()):
+for r in low_items.itertuples():
     layer = handler.get_first_layer(r.itemid)
     if not layer: continue
     inv_batches = handler.get_inventory_batches(r.itemid)
@@ -130,47 +174,49 @@ for idx, r in enumerate(low_items.itertuples()):
         inv_batches_html += (
             f"<div class='inv-batch'>{qty} units &nbsp;|&nbsp; {storloc} &nbsp;|&nbsp; {exp}</div>"
         )
-    qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
-    scan_btn_key = f"scan_{r.itemid}"
 
-    c1,c2,c3,c4,c5 = st.columns([3,0.9,2,1,0.7])
-    c1.markdown(
-        f"<div class='item-card'><b>{itemname}</b><br>"
-        f"📦 {current_qty} (avg: {shelfavg}, thr: {shelfthreshold}) | 🗺️ {locid}<br>"
-        f"🔖 <span style='font-family:monospace'>{barcode}</span><br>"
-        f"<b>Inventory batches:</b> {inv_batches_html if inv_batches else '<span style=\"color:#C61C1C;\">None in stock</span>'}<br>"
-        f"<div class='catline'><span class='cat-class'>Class:</span> <span class='cat-val'>{classcat}</span></div>"
-        f"<div class='catline'><span class='cat-dept'>Department:</span> <span class='cat-val'>{departmentcat}</span></div>"
-        f"<div class='catline'><span class='cat-sect'>Section:</span> <span class='cat-val'>{sectioncat}</span></div>"
-        f"<div class='catline'><span class='cat-family'>Family:</span> <span class='cat-val'>{familycat}</span></div>"
-        f"</div>", unsafe_allow_html=True)
-    qty = c2.number_input(
-        "", min_value=1, max_value=max_refill,
-        value=suggested if suggested <= max_refill else max_refill, step=1,
-        key=qk, label_visibility="collapsed"
-    )
+    # --- barcode scan per item ---
+    scan_key = f"scan_{r.itemid}"
+    input_key = f"barcode_input_{r.itemid}"
+    show_scan = st.session_state.get("scan_states", {}).get(r.itemid, False)
 
-    # Scan button and barcode input logic
-    scan_triggered = c3.button("📷 Scan", key=scan_btn_key)
-    cur_barcode = st.session_state.barcode_scan_value.get(r.itemid, "")
-    if scan_triggered:
-        st.session_state.scan_row = r.itemid
-    if st.session_state.scan_row == r.itemid and QR_AVAILABLE:
-        scanned = qrcode_scanner(key=f"scan_field_{r.itemid}") or ""
-        if scanned:
-            st.session_state.barcode_scan_value[r.itemid] = scanned
-            st.session_state.scan_row = None
-            st.success(f"Scanned: {scanned}")
-
-    bc_val = c4.text_input("", value=st.session_state.barcode_scan_value.get(r.itemid, ""), key=bck, placeholder="scan or type barcode...", label_visibility="collapsed")
-    ok  = bc_val.strip() == barcode
-    if bc_val: c4.markdown(f"<span class='{ 'good' if ok else 'bad'}'>{'✅' if ok else '❌'}</span>",unsafe_allow_html=True)
-    fire = c5.button("🚚", key=btnk, disabled=not ok, type="primary")
-    if fire:
-        handler.move_layer(itemid=r.itemid,expiration=layer["expirationdate"],
-                           qty=int(qty),cost=layer["cost_per_unit"],locid=locid,
-                           by=st.session_state.get("user_email","AutoTransfer"))
-        st.success(f"✅ {itemname} → {qty} to {locid}")
-        st.session_state.barcode_scan_value[r.itemid] = ""
-        st.session_state.scan_row = None
-        st.rerun()
+    with st.container():
+        c1,c2,c3,c4 = st.columns([3,0.9,2,1.3])
+        c1.markdown(
+            f"<div class='item-card'><b>{itemname}</b><br>"
+            f"📦 {current_qty} (avg: {shelfavg}, thr: {shelfthreshold}) | 🗺️ {locid}<br>"
+            f"🔖 <span style='font-family:monospace'>{barcode}</span><br>"
+            f"<b>Inventory batches:</b> {inv_batches_html if inv_batches else '<span style=\"color:#C61C1C;\">None in stock</span>'}<br>"
+            f"<div class='catline'><span class='cat-class'>Class:</span> <span class='cat-val'>{classcat}</span></div>"
+            f"<div class='catline'><span class='cat-dept'>Department:</span> <span class='cat-val'>{departmentcat}</span></div>"
+            f"<div class='catline'><span class='cat-sect'>Section:</span> <span class='cat-val'>{sectioncat}</span></div>"
+            f"<div class='catline'><span class='cat-family'>Family:</span> <span class='cat-val'>{familycat}</span></div>"
+            f"</div>", unsafe_allow_html=True)
+        qty = c2.number_input(
+            "", min_value=1, max_value=max_refill,
+            value=suggested if suggested <= max_refill else max_refill, step=1,
+            key=f"qty_{r.itemid}", label_visibility="collapsed"
+        )
+        if show_scan and QR_AVAILABLE:
+            scanned = qrcode_scanner(key=f"barcode_cam_{r.itemid}")
+            if scanned:
+                st.session_state[input_key] = scanned
+                st.session_state["scan_states"][r.itemid] = False  # auto-close scan box after successful scan
+                st.success(f"Scanned: {scanned}")
+        bc_col = c3
+        barcode_val = bc_col.text_input("", key=input_key, placeholder="Type or scan...", label_visibility="collapsed")
+        ok = barcode_val.strip() == barcode
+        if QR_AVAILABLE:
+            scan_btn = c4.button("📷 Scan", key=f"btn_scan_{r.itemid}", help="Scan barcode with camera", type="secondary")
+            if scan_btn:
+                st.session_state["scan_states"][r.itemid] = not show_scan
+                st.experimental_rerun()
+        if barcode_val:
+            bc_col.markdown(f"<span class='{ 'good' if ok else 'bad'}'>{'✅' if ok else '❌'}</span>", unsafe_allow_html=True)
+        fire = c4.button("🚚", key=f"btn_refill_{r.itemid}", disabled=not ok, type="primary")
+        if fire:
+            handler.move_layer(itemid=r.itemid,expiration=layer["expirationdate"],
+                               qty=int(qty),cost=layer["cost_per_unit"],locid=locid,
+                               by=st.session_state.get("user_email","AutoTransfer"))
+            st.success(f"✅ {itemname} → {qty} to {locid}")
+            st.rerun()
