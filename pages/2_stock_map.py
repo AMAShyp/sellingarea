@@ -7,12 +7,12 @@ class BarcodeShelfHandler(DatabaseManager):
     def get_low_stock_items(self, thr=10, limit=10):
         return self.fetch_data("""
             SELECT i.itemid, i.itemnameenglish AS itemname, i.barcode,
-                   s.totalquantity AS shelfqty,
-                   i.shelfthreshold, i.shelfaverage,
-                   s2.quantity as shelf_current_qty, s2.locid
+                   s.totalquantity AS shelfqty,              -- current on shelf
+                   i.shelfthreshold, i.shelfaverage,         -- from item table
+                   s2.locid, s2.quantity as shelf_current_qty -- shelf location and current qty for each item
             FROM item i
-            JOIN (SELECT itemid,SUM(quantity) AS totalquantity FROM shelf GROUP BY itemid) s
-                 ON i.itemid=s.itemid
+            JOIN (SELECT itemid, SUM(quantity) AS totalquantity FROM shelf GROUP BY itemid) s
+                 ON i.itemid = s.itemid
             JOIN shelf s2 ON s2.itemid = i.itemid
             WHERE s.totalquantity <= COALESCE(i.shelfthreshold,%s)
             ORDER BY s.totalquantity ASC LIMIT %s
@@ -91,7 +91,7 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
 handler = BarcodeShelfHandler()
 map_handler = ShelfMapHandler()
 st.set_page_config(layout="wide")
-st.title("📤 Low-Stock Items Map (Refill allowed: 1 to shelfaverage-current)")
+st.title("📤 Low-Stock Items Map (Debugging all logic origins)")
 
 low_items = handler.get_low_stock_items()
 if low_items.empty:
@@ -110,49 +110,63 @@ st.markdown("""
 .refill-btn button{background:#1abc9c!important;color:#fff!important;font-weight:bold;
                    border-radius:.45rem!important;padding:.15rem .57rem!important;margin-top:.03rem}
 .fullcard{color:#a15c00;background:#fdf6ed;border:1.5px dashed #f7b983;padding:0.25rem 0.55rem;border-radius:.55rem;font-size:1.02em}
+.debugbox{background:#f6f7fa;color:#303040;padding:0.18em 0.8em 0.12em 0.8em;font-size:0.98em;margin-bottom:0.1em;border-radius:0.45em;border:1.5px dotted #b1c1d1}
 </style>""",unsafe_allow_html=True)
 
 for r in low_items.itertuples():
     layer = handler.get_first_layer(r.itemid)
     if not layer: continue
     locid = getattr(r, "locid", layer.get("locid",""))
-    current_qty = int(r.shelfqty)
+    barcode = getattr(r, "barcode", "-")
+    itemname = getattr(r, "itemname", "-")
     shelfavg = float(getattr(r, "shelfaverage", 0) or 0)
-    # Only allow refill if shelfaverage > current
-    if shelfavg <= current_qty:
+    shelfthreshold = int(getattr(r, "shelfthreshold", 1))
+    current_qty = int(getattr(r, "shelfqty", 0))
+    shelf_current_qty = int(getattr(r, "shelf_current_qty", layer.get("quantity", 0)))
+    # Debug display: show all numbers and columns
+    debug_text = (
+        f"<div class='debugbox'><b>Debug Info:</b><br>"
+        f"<b>itemid</b>: {r.itemid}<br>"
+        f"<b>From shelf table</b>:<br>"
+        f" &nbsp; - <b>locid</b>: <code>{locid}</code><br>"
+        f" &nbsp; - <b>current shelf qty</b>: <code>{shelf_current_qty}</code> (shelf.quantity, shelf_map_handler.get_first_layer)<br>"
+        f"<b>From item table</b>:<br>"
+        f" &nbsp; - <b>shelfqty</b>: <code>{current_qty}</code> (SUM(shelf.quantity))<br>"
+        f" &nbsp; - <b>shelfaverage</b>: <code>{shelfavg}</code><br>"
+        f" &nbsp; - <b>shelfthreshold</b>: <code>{shelfthreshold}</code><br>"
+        f" &nbsp; - <b>barcode</b>: <code>{barcode}</code><br>"
+        "</div>"
+    )
+
+    # Only allow refill if shelfaverage > current_qty
+    refill_max = int(shelfavg - current_qty)
+    if shelfavg <= current_qty or refill_max < 1:
         c1, c2 = st.columns([3, 2])
         c1.markdown(
-            f"<div class='fullcard'><b>{r.itemname}</b> — Already at or above average.<br>"
+            f"<div class='fullcard'><b>{itemname}</b> — At/above average, cannot refill.<br>"
             f"📦 {current_qty} (avg: {shelfavg}) | 🗺️ {locid}<br>"
-            f"🔖 <span style='font-family:monospace'>{r.barcode}</span></div>",
-            unsafe_allow_html=True)
+            f"🔖 <span style='font-family:monospace'>{barcode}</span><br>"
+            f"{debug_text}"
+            "</div>",unsafe_allow_html=True)
         c2.button("✅ At/Above Average", disabled=True, key=f"btn_full_{r.itemid}")
         continue
-    max_refill = int(shelfavg - current_qty)
-    if max_refill < 1:
-        c1, c2 = st.columns([3, 2])
-        c1.markdown(
-            f"<div class='fullcard'><b>{r.itemname}</b> — No refill possible.<br>"
-            f"📦 {current_qty} (avg: {shelfavg}) | 🗺️ {locid}<br>"
-            f"🔖 <span style='font-family:monospace'>{r.barcode}</span></div>",
-            unsafe_allow_html=True)
-        c2.button("⛔ Cannot Refill", disabled=True, key=f"btn_nofill_{r.itemid}")
-        continue
+
     qk=f"q_{r.itemid}"; bck=f"bc_{r.itemid}"; btnk=f"btn_{r.itemid}"
     c1,c2,c3,c4 = st.columns([3,0.9,2,0.7])
-    c1.markdown(f"<div class='item-card'><b>{r.itemname}</b><br>"
-                f"📦 {current_qty} (avg: {shelfavg}) | 🗺️ {locid}<br>"
-                f"🔖 <span style='font-family:monospace'>{r.barcode}</span></div>",unsafe_allow_html=True)
+    c1.markdown(f"<div class='item-card'><b>{itemname}</b><br>"
+                f"📦 {current_qty} (avg: {shelfavg}, thr: {shelfthreshold}) | 🗺️ {locid}<br>"
+                f"🔖 <span style='font-family:monospace'>{barcode}</span>"
+                f"{debug_text}</div>",unsafe_allow_html=True)
     qty = c2.number_input(
-        "", min_value=1, max_value=max_refill,
-        value=max_refill, key=qk, label_visibility="collapsed"
+        "", min_value=1, max_value=refill_max,
+        value=refill_max, key=qk, label_visibility="collapsed"
     )
     bc  = c3.text_input("",key=bck,placeholder="scan",label_visibility="collapsed")
-    ok  = bc.strip()==r.barcode
+    ok  = bc.strip()==barcode
     if bc: c3.markdown(f"<span class='{ 'good' if ok else 'bad'}'>{'✅' if ok else '❌'}</span>",unsafe_allow_html=True)
     fire=c4.button("🚚",key=btnk,disabled=not ok,type="primary")
     if fire:
         handler.move_layer(itemid=r.itemid,expiration=layer["expirationdate"],
                            qty=int(qty),cost=layer["cost_per_unit"],locid=locid,
                            by=st.session_state.get("user_email","AutoTransfer"))
-        st.success(f"✅ {r.itemname} → {qty} to {locid}"); st.rerun()
+        st.success(f"✅ {itemname} → {qty} to {locid}"); st.rerun()
