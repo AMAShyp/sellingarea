@@ -57,16 +57,14 @@ st.title("⏰ Near Expiry Shelf Items")
 try:
     shelf_handler = ShelfHandler()
     shelf_df = shelf_handler.get_shelf_items()
+    # Make all columns lower-case for robustness
+    shelf_df.columns = [c.lower() for c in shelf_df.columns]
     st.write("DEBUG: shelf_df shape", shelf_df.shape)
     if shelf_df.empty:
         st.info("No items in the selling area.")
         st.stop()
 
-    if "locid" not in shelf_df.columns:
-        st.error("Error: The shelf items data does not include a 'locid' column. Please fix your get_shelf_items() SQL to return locid for map display.")
-        st.stop()
-
-    # --- Map handler and locations ---
+    # Map handler and locations
     map_handler = ShelfMapHandler()
     shelf_locs = map_handler.get_locations()
 
@@ -76,6 +74,7 @@ try:
 
     # bring shelf-life info
     item_df = shelf_handler.fetch_data("SELECT itemid, shelflife FROM item")
+    item_df.columns = [c.lower() for c in item_df.columns]
     shelf_df = shelf_df.merge(item_df, on="itemid", how="left")
 
     subtab_days, subtab_percent = st.tabs(["📅 Days-Based", "📐 Shelf Life %"])
@@ -108,6 +107,10 @@ try:
                 f"✅ No items expiring within {green_days} days."
             )
         else:
+            # Defensive: check for locid
+            if "locid" not in near_expiry_df.columns:
+                st.error("Column 'locid' not found in your shelf data!")
+                st.stop()
             hi_locs = sorted(set(near_expiry_df["locid"].dropna().unique()))
             st.markdown("#### 🗺️ Shelf Map: Red = shelves with near-expiry items")
             st.plotly_chart(map_with_highlights(shelf_locs, hi_locs), use_container_width=True)
@@ -189,6 +192,9 @@ try:
                     "✅ No items are below the selected fraction of shelf life."
                 )
             else:
+                if "locid" not in alerts_frac_df.columns:
+                    st.error("Column 'locid' not found in your shelf data!")
+                    st.stop()
                 hi_locs = sorted(set(alerts_frac_df["locid"].dropna().unique()))
                 st.markdown("#### 🗺️ Shelf Map: Red = shelves with near-expiry items (by shelf life %)")
                 st.plotly_chart(map_with_highlights(shelf_locs, hi_locs), use_container_width=True)
