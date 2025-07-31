@@ -1,266 +1,168 @@
-import streamlit as st
+# shelf_map/shelf_map_handler.py
 from db_handler import DatabaseManager
 
-# Only import ShelfMapHandler here, NOT inside shelf_map_handler.py!
-from shelf_map.shelf_map_handler import ShelfMapHandler
 
-import plotly.graph_objects as go
+class ShelfMapHandler(DatabaseManager):
+    """All DB reads for the Shelf-Map page."""
 
-try:
-    from streamlit_qrcode_scanner import qrcode_scanner
-    QR_AVAILABLE = True
-except ImportError:
-    QR_AVAILABLE = False
+    # ── shelf geometry ─────────────────────────────────────────────
+    def get_locations(self) -> list[dict]:
+        sql = """
+            SELECT locid,
+                   label,
+                   x_pct, y_pct,
+                   w_pct, h_pct,
+                   COALESCE(rotation_deg, 0) AS rotation_deg
+            FROM   shelf_map_locations
+            ORDER  BY locid;
+        """
+        return self.fetch_data(sql).to_dict("records")
 
-class DeclareHandler(DatabaseManager):
-    def get_item_by_barcode(self, barcode):
-        df = self.fetch_data("""
-            SELECT itemid, itemnameenglish AS name, barcode,
-                   familycat, sectioncat, departmentcat, classcat
-            FROM item
-            WHERE barcode = %s
-            LIMIT 1
-        """, (barcode,))
-        return df.iloc[0] if not df.empty else None
+    # ── live stock on one shelf ────────────────────────────────────
+    def get_stock_by_location(self, locid):
+        sql = """
+          SELECT s.shelfid,
+                 i.itemid,
+                 i.itemnameenglish AS item,
+                 s.quantity,
+                 s.expirationdate
+          FROM   shelf s
+          JOIN   item  i USING (itemid)
+          WHERE  s.locid = %s
+          ORDER  BY i.itemnameenglish, s.expirationdate;
+        """
+        return self.fetch_data(sql, (locid,))
 
-    def get_shelf_entries(self, itemid):
-        df = self.fetch_data("""
-            SELECT locid, SUM(quantity) as qty
-            FROM shelf
-            WHERE itemid=%s
-            GROUP BY locid
-            ORDER BY locid
-        """, (int(itemid),))
-        return df
+    def get_stock_by_locations(self, locids: list[str]):
+        """Return stock entries for all given shelf ``locid`` values."""
+        if not locids:
+            return self.fetch_data("SELECT NULL WHERE FALSE")
+        placeholders = ", ".join(["%s"] * len(locids))
+        sql = f"""
+            SELECT s.locid,
+                   s.shelfid,
+                   i.itemid,
+                   i.itemnameenglish AS item,
+                   s.quantity,
+                   s.expirationdate
+              FROM shelf s
+              JOIN item i USING (itemid)
+             WHERE s.locid IN ({placeholders})
+             ORDER BY s.locid, i.itemnameenglish, s.expirationdate;
+        """
+        return self.fetch_data(sql, tuple(locids))
 
-    def get_inventory_total(self, itemid):
-        df = self.fetch_data("""
-            SELECT SUM(quantity) as total
-            FROM inventory
-            WHERE itemid=%s AND quantity > 0
-        """, (int(itemid),))
-        return int(df.iloc[0]['total']) if not df.empty and df.iloc[0]['total'] is not None else 0
+    # ── item lookups ─────────────────────────────────────────────────
+    def get_items_on_shelf(self):
+        sql = """
+            SELECT DISTINCT i.itemid,
+                            i.itemnameenglish AS itemname
+            FROM   shelf s
+            JOIN   item  i USING (itemid)
+            ORDER  BY i.itemnameenglish;
+        """
+        return self.fetch_data(sql)
 
-    def subtract_inventory(self, itemid, qty):
-        batches = self.fetch_data("""
-            SELECT expirationdate, cost_per_unit, quantity
-            FROM inventory
-            WHERE itemid=%s AND quantity > 0
-            ORDER BY expirationdate ASC, cost_per_unit ASC
-        """, (int(itemid),))
-        left = qty
-        for _, row in batches.iterrows():
-            take = min(left, int(row['quantity']))
-            self.execute_command(
-                """
-                UPDATE inventory SET quantity=quantity-%s
-                WHERE itemid=%s AND expirationdate=%s AND cost_per_unit=%s AND quantity>=%s
-                """,
-                (take, int(itemid), row['expirationdate'], row['cost_per_unit'], take)
-            )
-            left -= take
-            if left <= 0:
-                break
-        return qty - left
+    def get_locations_by_itemid(self, itemid):
+        sql = """
+            SELECT DISTINCT locid
+            FROM   shelf
+            WHERE  itemid = %s;
+        """
+        return self.fetch_data(sql, (int(itemid),))
 
-    def set_shelf_quantity(self, itemid, locid, qty):
-        exists = self.fetch_data(
-            "SELECT quantity FROM shelf WHERE itemid=%s AND locid=%s",
-            (int(itemid), locid)
-        )
-        if exists.empty:
-            self.execute_command("""
-                INSERT INTO shelf (itemid, expirationdate, quantity, cost_per_unit, locid)
-                VALUES (%s, CURRENT_DATE, %s, 0, %s)
-            """, (int(itemid), qty, locid))
-        else:
-            self.execute_command("""
-                UPDATE shelf SET quantity=%s WHERE itemid=%s AND locid=%s
-            """, (qty, int(itemid), locid))
+    def get_locations_by_barcode(self, barcode):
+        sql = """
+            SELECT DISTINCT s.locid
+            FROM   shelf s
+            JOIN   item i ON s.itemid = i.itemid
+            WHERE  i.barcode = %s
+               OR i.packetbarcode = %s
+               OR i.cartonbarcode = %s;
+        """
+        return self.fetch_data(sql, (barcode, barcode, barcode))
 
-    def get_all_locids(self):
-        df = self.fetch_data("""
-            SELECT locid FROM shelf_map_locations ORDER BY locid
-        """)
-        return df["locid"].tolist() if not df.empty else []
+    def get_itemid_by_barcode(self, barcode):
+        sql = """
+            SELECT itemid
+              FROM item
+             WHERE barcode = %s
+                OR packetbarcode = %s
+                OR cartonbarcode = %s
+             LIMIT 1;
+        """
+        df = self.fetch_data(sql, (barcode, barcode, barcode))
+        return int(df.loc[0, "itemid"]) if not df.empty else None
 
-def map_with_labels_and_highlight(locs, highlight_locs, label_offset=0.018):
-    shapes = []
-    all_labels = []
-    highlight_set = set(highlight_locs)
-    for row in locs:
-        try:
-            x, y, w, h = float(row["x_pct"]), float(row["y_pct"]), float(row["w_pct"]), float(row["h_pct"])
-        except Exception:
-            continue
-        deg = float(row.get("rotation_deg") or 0)
-        cx, cy = x + w/2, 1 - (y + h/2)
-        y_draw = 1 - y - h
-        is_hi = row["locid"] in highlight_set
-        fill = "rgba(220,53,69,0.34)" if is_hi else "rgba(180,180,180,0.09)"
-        line = dict(width=2 if is_hi else 1.2, color="#d8000c" if is_hi else "#888")
-        if deg == 0:
-            shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
-        else:
-            import math
-            rad = math.radians(deg)
-            cos, sin = math.cos(rad), math.sin(rad)
-            pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
-            path = "M " + " L ".join(f"{cx+u*cos-v*sin},{cy+u*sin+v*cos}" for u, v in pts) + " Z"
-            shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
-        if is_hi:
-            r = max(w, h) * 0.5
-            shapes.append(dict(type="circle",xref="x",yref="y",
-                               x0=cx-r,x1=cx+r,y0=cy-r,y1=cy+r,
-                               line=dict(color="#d8000c",width=2,dash="dot")))
-        all_labels.append({
-            "locid": row["locid"],
-            "x": x + w/2,
-            "y": 1 - (y + h/2),
-            "highlight": is_hi,
-            "label": row.get("label", row["locid"])
-        })
-    fig = go.Figure()
-    fig.update_layout(shapes=shapes, height=340, margin=dict(l=12,r=12,t=10,b=5),
-                      plot_bgcolor="#f8f9fa")
-    fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
-    fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
-    for label in all_labels:
-        fig.add_annotation(
-            x=label["x"],
-            y=label["y"] + (label_offset if label["highlight"] else 0),
-            text=label["label"],
-            showarrow=False,
-            font=dict(size=11, color="#c90000" if label["highlight"] else "#888", family="monospace"),
-            align="center",
-            bgcolor="rgba(255,255,255,0.99)" if label["highlight"] else "rgba(235,235,235,0.7)",
-            bordercolor="#d8000c" if label["highlight"] else "#bbb",
-            borderpad=2,
-            opacity=0.99 if label["highlight"] else 0.7,
-        )
-    return fig
+    # ── stock details for a specific item ────────────────────────────
+    def get_stock_for_item(self, itemid):
+        """Return quantity and expirations for the given item across shelves."""
+        sql = """
+            SELECT s.locid,
+                   s.shelfid,
+                   s.quantity,
+                   s.expirationdate
+              FROM shelf s
+             WHERE s.itemid = %s
+             ORDER BY s.locid, s.expirationdate;
+        """
+        return self.fetch_data(sql, (int(itemid),))
 
-st.set_page_config(layout="centered")
-st.title("🟢 Declare Selling Area Quantity (Barcode, Map, & Location)")
+    # ── aggregated quantity per shelf ───────────────────────────────
+    def get_heatmap_data(self, near_days: int | None = None) -> list[dict]:
+        """
+        Return shelf geometry with aggregated quantity.
 
-handler = DeclareHandler()
-map_handler = ShelfMapHandler()
+        If `near_days` is given, only items that expire **within N days**
+        are counted; otherwise we aggregate all quantities.
+        """
+        if near_days is None:
+            sql = """
+                SELECT l.locid, l.label,
+                       l.x_pct, l.y_pct, l.w_pct, l.h_pct,
+                       COALESCE(l.rotation_deg,0) AS rotation_deg,
+                       COALESCE(SUM(s.quantity),0) AS quantity
+                  FROM shelf_map_locations l
+             LEFT JOIN shelf s USING (locid)
+              GROUP BY l.locid, l.label, l.x_pct, l.y_pct,
+                       l.w_pct, l.h_pct, l.rotation_deg
+              ORDER BY l.locid;
+            """
+            return self.fetch_data(sql).to_dict("records")
 
-st.markdown("""
-<style>
-.catline {margin:0.08em 0 0.09em 0;font-size:1.1em;}
-.cat-class {color:#C61C1C;font-weight:bold;}
-.cat-dept {color:#004CBB;font-weight:bold;}
-.cat-sect {color:#098A23;font-weight:bold;}
-.cat-family {color:#FF8800;font-weight:bold;}
-.cat-val {color:#111;}
-.scan-hint {
-    font-size: 1.28em;
-    color: #087911;
-    font-weight: 600;
-    background: #eafdff;
-    padding: .14em .7em .13em .7em;
-    border-radius: .45em;
-    margin: .2em 0 .5em 0;
-    text-align:center;
-}
-</style>
-""", unsafe_allow_html=True)
+        sql = """
+            SELECT l.locid, l.label,
+                   l.x_pct, l.y_pct, l.w_pct, l.h_pct,
+                   COALESCE(l.rotation_deg,0) AS rotation_deg,
+                   COALESCE(SUM(s.quantity),0) AS quantity
+              FROM shelf_map_locations l
+         LEFT JOIN shelf s USING (locid)
+             WHERE s.expirationdate <= CURRENT_DATE + %s::interval
+          GROUP BY l.locid, l.label, l.x_pct, l.y_pct,
+                   l.w_pct, l.h_pct, l.rotation_deg
+          ORDER BY l.locid;
+        """
+        return self.fetch_data(sql, (f"{near_days} days",)).to_dict("records")
 
-@st.cache_data(show_spinner=False)
-def get_all_map_locs():
-    return map_handler.get_locations()
-
-all_map_locs = get_all_map_locs()
-
-tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
-
-def declare_logic(barcode, reset_callback):
-    if not barcode:
-        st.info("Please scan or enter the item barcode.")
-        return
-
-    item = handler.get_item_by_barcode(barcode)
-    if item is not None:
-        st.markdown(f"**Item:** {item['name']}<br>🔖 Barcode: `{item['barcode']}`", unsafe_allow_html=True)
-        st.markdown(
-            f"<div class='catline'><span class='cat-class'>Class:</span> <span class='cat-val'>{item['classcat']}</span></div>"
-            f"<div class='catline'><span class='cat-dept'>Department:</span> <span class='cat-val'>{item['departmentcat']}</span></div>"
-            f"<div class='catline'><span class='cat-sect'>Section:</span> <span class='cat-val'>{item['sectioncat']}</span></div>"
-            f"<div class='catline'><span class='cat-family'>Family:</span> <span class='cat-val'>{item['familycat']}</span></div>",
-            unsafe_allow_html=True)
-        itemid = int(item['itemid'])
-        shelf_entries = handler.get_shelf_entries(itemid)
-        inventory_total = handler.get_inventory_total(itemid)
-        all_locids = handler.get_all_locids()
-
-        prev_qty = 0
-        prev_locid = ""
-        if shelf_entries.empty:
-            st.warning("No previous quantity declared for this item in the selling area.")
-        else:
-            prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
-            prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
-
-        locid = st.text_input(
-            "Shelf Location (locid)",
-            value=prev_locid,
-            key="declare_locid",
-            max_chars=32,
-            help="Start typing to see suggested locations."
-        )
-        highlight = [locid] if locid and locid in [l['locid'] for l in all_map_locs] else []
-        st.markdown("#### 📍 Shelf Location Map")
-        st.plotly_chart(map_with_labels_and_highlight(all_map_locs, highlight), use_container_width=True, key="declare_map")
-
-        loc_suggestions = [x for x in all_locids if locid.strip().lower() in x.lower()][:8] if locid else all_locids[:8]
-        if locid and locid not in all_locids and loc_suggestions:
-            st.caption("Closest matches: " + ", ".join(f"`{l}`" for l in loc_suggestions))
-        elif not locid and all_locids:
-            st.caption("Sample locations: " + ", ".join(f"`{l}`" for l in all_locids[:8]))
-
-        st.info(f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
-                f"**Available in inventory:** {inventory_total}")
-
-        new_qty = st.number_input("Declare current selling area quantity", min_value=0, value=prev_qty, step=1, key="declare_qty")
-
-        col1, col2 = st.columns([2,1])
-        with col1:
-            confirm = st.button("✅ Confirm Declaration", type="primary")
-        with col2:
-            if st.button("🔄 New Scan", type="secondary"):
-                reset_callback()
-                st.rerun()
-
-        if confirm:
-            diff = new_qty - prev_qty
-            if diff > 0:
-                actual_subtracted = handler.subtract_inventory(itemid, diff)
-                st.success(f"Inventory reduced by {actual_subtracted}.")
-            elif diff < 0:
-                st.info("Declared quantity is less than previous; only updating shelf record, not adding back to inventory.")
-            handler.set_shelf_quantity(itemid, locid, new_qty)
-            st.success(f"Selling area quantity for '{item['name']}' at {locid} is now {new_qty}.")
-            st.rerun()
-    elif barcode.strip():
-        st.error("❌ Barcode not found in the item table.")
-
-def reset_camera_scan():
-    for k in ["barcode_cam", "barcode_input", "declare_qty", "declare_locid"]:
-        if k in st.session_state:
-            st.session_state.pop(k)
-
-with tab1:
-    barcode = ""
-    if QR_AVAILABLE:
-        st.markdown("<div class='scan-hint'>Aim the barcode at your phone or webcam for instant detection.<br>Hold steady and close to the lens.</div>", unsafe_allow_html=True)
-        barcode = qrcode_scanner(key="barcode_cam") or ""
-        if barcode:
-            st.success(f"Scanned: {barcode}")
-        declare_logic(barcode, reset_camera_scan)
-    else:
-        st.warning("Camera scanning not available. Please use tab 2 or `pip install streamlit-qrcode-scanner`.")
-
-with tab2:
-    barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
-    declare_logic(barcode, lambda: reset_camera_scan())
+    def get_heatmap_threshold(self) -> list[dict]:
+        """
+        Return shelf geometry with:
+        • quantity  = sum of units on that shelf
+        • threshold = sum of item-level shelfthreshold values
+        """
+        sql = """
+          SELECT l.locid,
+                 l.label,
+                 l.x_pct, l.y_pct,
+                 l.w_pct, l.h_pct,
+                 COALESCE(l.rotation_deg,0)               AS rotation_deg,
+                 COALESCE(SUM(s.quantity),0)              AS quantity,
+                 COALESCE(SUM(it.shelfthreshold),0)       AS threshold
+            FROM shelf_map_locations l
+       LEFT JOIN shelf s   USING (locid)
+       LEFT JOIN item  it  ON it.itemid = s.itemid
+        GROUP BY l.locid, l.label, l.x_pct, l.y_pct,
+                 l.w_pct, l.h_pct, l.rotation_deg
+        ORDER BY l.locid;
+        """
+        return self.fetch_data(sql).to_dict("records")
