@@ -1,6 +1,9 @@
 import streamlit as st
 from db_handler import DatabaseManager
+
+# Only import ShelfMapHandler here, NOT inside shelf_map_handler.py!
 from shelf_map.shelf_map_handler import ShelfMapHandler
+
 import plotly.graph_objects as go
 
 try:
@@ -76,7 +79,6 @@ class DeclareHandler(DatabaseManager):
             """, (qty, int(itemid), locid))
 
     def get_all_locids(self):
-        # Get all from shelf_map_locations
         df = self.fetch_data("""
             SELECT locid FROM shelf_map_locations ORDER BY locid
         """)
@@ -123,7 +125,6 @@ def map_with_labels_and_highlight(locs, highlight_locs, label_offset=0.018):
                       plot_bgcolor="#f8f9fa")
     fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
-    # Draw all labels (grey default, red highlight)
     for label in all_labels:
         fig.add_annotation(
             x=label["x"],
@@ -166,7 +167,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Cache all shelf map locations at app startup
 @st.cache_data(show_spinner=False)
 def get_all_map_locs():
     return map_handler.get_locations()
