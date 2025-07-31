@@ -1,4 +1,5 @@
 import streamlit as st
+import pandas as pd
 from db_handler import DatabaseManager
 from shelf_map.shelf_map_handler import ShelfMapHandler
 import plotly.graph_objects as go
@@ -14,6 +15,11 @@ try:
     PLOTLY_EVENTS_AVAILABLE = True
 except ImportError:
     PLOTLY_EVENTS_AVAILABLE = False
+
+# --- LOAD filtered locid list from CSV ---
+LOCID_CSV_PATH = "assets/locid_list.csv"
+locid_df = pd.read_csv(LOCID_CSV_PATH)
+FILTERED_LOCIDS = set(str(l).strip() for l in locid_df["locid"].dropna().unique())
 
 class DeclareHandler(DatabaseManager):
     def get_item_by_barcode(self, barcode):
@@ -34,7 +40,8 @@ class DeclareHandler(DatabaseManager):
             GROUP BY locid
             ORDER BY locid
         """, (int(itemid),))
-        return df
+        # Only use filtered locids
+        return df[df["locid"].isin(FILTERED_LOCIDS)] if not df.empty else df
 
     def get_inventory_total(self, itemid):
         df = self.fetch_data("""
@@ -82,31 +89,32 @@ class DeclareHandler(DatabaseManager):
             """, (qty, int(itemid), locid))
 
     def get_all_locids(self):
-        df = self.fetch_data("""
-            SELECT locid FROM shelf_map_locations ORDER BY locid
-        """)
-        return df["locid"].tolist() if not df.empty else []
+        # Only return filtered locids, sorted
+        return sorted(FILTERED_LOCIDS)
 
-# --- MAP rendering function, labels always visible on all cells ---
-def map_with_labels_and_highlights(locs, highlight_locs, label_offset=0.018):
+# --- MAP rendering function, only for filtered locids ---
+def map_with_highlights_and_hover(locs, highlight_locs, allowed_locids, label_offset=0.018):
     import math
     shapes = []
     polygons = []
     trace_x = []
     trace_y = []
     trace_text = []
-    annotations = []
     for row in locs:
+        if str(row["locid"]) not in allowed_locids:
+            continue
         x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
         cx, cy = x + w/2, 1 - (y + h/2)
         y_draw = 1 - y - h
         is_hi = row["locid"] in highlight_locs
-        fill = "rgba(220,53,69,0.34)" if is_hi else "rgba(180,180,180,0.13)"
+        fill = "rgba(220,53,69,0.34)" if is_hi else "rgba(180,180,180,0.11)"
         line = dict(width=2 if is_hi else 1.2, color="#d8000c" if is_hi else "#888")
-        # For clickability, we'll record the center
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
+            trace_x.append(cx)
+            trace_y.append(cy)
+            trace_text.append(row.get("label", row["locid"]))
             polygons.append({
                 "locid": row["locid"],
                 "center": (cx, cy)
@@ -116,29 +124,15 @@ def map_with_labels_and_highlights(locs, highlight_locs, label_offset=0.018):
             cos, sin = math.cos(rad), math.sin(rad)
             pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
             abs_pts = [(cx + u * cos - v * sin, cy + u * sin + v * cos) for u, v in pts]
+            trace_x.append(cx)
+            trace_y.append(cy)
+            trace_text.append(row.get("label", row["locid"]))
             polygons.append({
                 "locid": row["locid"],
                 "center": (cx, cy)
             })
             path = "M " + " L ".join(f"{x_},{y_}" for x_, y_ in abs_pts) + " Z"
             shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
-        # Add invisible scatter for click event
-        trace_x.append(cx)
-        trace_y.append(cy)
-        trace_text.append(row.get("label", row["locid"]))
-        # Always add a label annotation for every cell
-        annotations.append(dict(
-            x=cx,
-            y=cy + label_offset,
-            text=row.get("label", row["locid"]),
-            showarrow=False,
-            font=dict(size=12, color="#1a222e", family="monospace"),
-            align="center",
-            bgcolor="rgba(255,255,255,0.92)",
-            bordercolor="#c7ebe5",
-            borderpad=1.5,
-            opacity=0.94,
-        ))
         if is_hi:
             r = max(w, h) * 0.5
             shapes.append(dict(type="circle",xref="x",yref="y",
@@ -146,7 +140,7 @@ def map_with_labels_and_highlights(locs, highlight_locs, label_offset=0.018):
                                line=dict(color="#d8000c",width=2,dash="dot")))
     fig = go.Figure()
     fig.update_layout(shapes=shapes, height=340, margin=dict(l=12,r=12,t=10,b=5),
-                      plot_bgcolor="#f8f9fa", annotations=annotations)
+                      plot_bgcolor="#f8f9fa")
     fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
     fig.add_scatter(
@@ -156,6 +150,23 @@ def map_with_labels_and_highlights(locs, highlight_locs, label_offset=0.018):
         hoverinfo="text",
         name="Shelves"
     )
+    for row in locs:
+        if str(row["locid"]) not in allowed_locids:
+            continue
+        if row["locid"] in highlight_locs:
+            x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
+            fig.add_annotation(
+                x=x + w/2,
+                y=1 - (y + h/2) + label_offset,
+                text=row.get("label",row["locid"]),
+                showarrow=False,
+                font=dict(size=11, color="#c90000", family="monospace"),
+                align="center",
+                bgcolor="rgba(255,255,255,0.92)",
+                bordercolor="#d8000c",
+                borderpad=2,
+                opacity=0.97,
+            )
     return fig, polygons, trace_text
 
 st.set_page_config(layout="centered")
@@ -206,11 +217,12 @@ def declare_logic(barcode, reset_callback):
         inventory_total = handler.get_inventory_total(itemid)
         all_locids = handler.get_all_locids()
 
-        # Show shelf map for this item after any valid scan or entry, with labels on every cell
-        shelf_locs = map_handler.get_locations()
+        # Only show filtered locids on the map
+        shelf_locs = [row for row in map_handler.get_locations() if str(row["locid"]) in FILTERED_LOCIDS]
         highlight_locs = shelf_entries["locid"].tolist() if not shelf_entries.empty else []
+
         st.markdown("#### 🗺️ Shelf Map — click anywhere to see shelf name/ID")
-        fig, polygons, trace_text = map_with_labels_and_highlights(shelf_locs, highlight_locs)
+        fig, polygons, trace_text = map_with_highlights_and_hover(shelf_locs, highlight_locs, FILTERED_LOCIDS)
         clicked_locid = None
 
         if PLOTLY_EVENTS_AVAILABLE:
@@ -233,13 +245,13 @@ def declare_logic(barcode, reset_callback):
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
-        # Searchable selectbox for location input
+        # Searchable selectbox for filtered locids only
         locid = st.selectbox(
             "Shelf Location (locid)",
             options=all_locids,
             index=all_locids.index(prev_locid) if prev_locid in all_locids else 0 if all_locids else 0,
             key="declare_locid",
-            help="Type or pick from the list. Press Enter to confirm your choice."
+            help="Type or pick from the filtered list. Press Enter to confirm your choice."
         ) if all_locids else st.text_input("Shelf Location (locid)", key="declare_locid", max_chars=32)
 
         st.info(f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
