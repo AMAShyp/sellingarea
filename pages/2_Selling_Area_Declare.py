@@ -74,8 +74,9 @@ class DeclareHandler(DatabaseManager):
             """, (qty, int(itemid), locid))
 
     def get_all_locids(self):
+        # Corrected table name!
         df = self.fetch_data("""
-            SELECT locid FROM shelf_map_location_2 ORDER BY locid
+            SELECT locid FROM shelf_map_locations ORDER BY locid
         """)
         return df["locid"].tolist() if not df.empty else []
 
@@ -134,7 +135,6 @@ def declare_logic(barcode, reset_callback):
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
-        # Location autocomplete: filter as you type, allows new or existing locations
         locid = st.text_input(
             "Shelf Location (locid)",
             value=prev_locid,
