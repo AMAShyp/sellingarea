@@ -40,11 +40,21 @@ class ShelfManagementHandler(DatabaseManager):
                 """, (int(itemid), locid))
         # If new_qty <= 0 and row doesn't exist, do nothing
 
+    def return_to_inventory(self, itemid, qty):
+        # Move qty back to inventory, using a simple FIFO logic or just add as new
+        if qty > 0:
+            self.execute_command("""
+                INSERT INTO inventory (itemid, expirationdate, quantity, cost_per_unit, storagelocation)
+                VALUES (%s, CURRENT_DATE, %s, 0, 'BulkReturn')
+                ON CONFLICT (itemid, expirationdate, cost_per_unit, storagelocation)
+                DO UPDATE SET quantity = inventory.quantity + EXCLUDED.quantity
+            """, (int(itemid), qty))
+
     def get_all_locids(self):
         return sorted(FILTERED_LOCIDS)
 
 st.set_page_config(layout="wide")
-st.title("🗄️ Shelf Items Management (Direct Declaration)")
+st.title("🗄️ Shelf Items Management")
 
 handler = ShelfManagementHandler()
 
@@ -55,56 +65,123 @@ if all_items_df.empty:
     st.info("No items found in the filtered shelves.")
     st.stop()
 
-selected_locid = st.selectbox(
-    "Select shelf location (locid) to manage:",
-    options=all_locids,
-    index=0,
-    help="Only locations from the filtered list."
-)
+tab1, tab2 = st.tabs(["Single Item Edit", "Bulk Shelf Change"])
 
-items_in_loc = all_items_df[all_items_df["locid"] == selected_locid].copy()
-if items_in_loc.empty:
-    st.info(f"No items currently on shelf `{selected_locid}`.")
-else:
-    st.markdown(f"### Items at shelf: `{selected_locid}`")
-    for idx, row in items_in_loc.iterrows():
-        itemid = row["itemid"]
-        name = row["name"]
-        barcode = row["barcode"]
-        shelf_qty = int(row["quantity"])
+with tab1:
+    selected_locid = st.selectbox(
+        "Select shelf location (locid) to manage:",
+        options=all_locids,
+        index=0,
+        help="Only locations from the filtered list."
+    )
 
-        col1, col2, col3, col4 = st.columns([2, 2, 1.5, 1.2])
+    items_in_loc = all_items_df[all_items_df["locid"] == selected_locid].copy()
+    if items_in_loc.empty:
+        st.info(f"No items currently on shelf `{selected_locid}`.")
+    else:
+        st.markdown(f"### Items at shelf: `{selected_locid}`")
+        for idx, row in items_in_loc.iterrows():
+            itemid = row["itemid"]
+            name = row["name"]
+            barcode = row["barcode"]
+            shelf_qty = int(row["quantity"])
 
-        with col1:
-            st.markdown(
-                f"**{name}**<br>"
-                f"<span style='color:#bbb;font-size:0.92em'>Barcode:</span> "
-                f"<span style='font-family:monospace;font-size:1em'>{barcode}</span>",
-                unsafe_allow_html=True
-            )
-        with col2:
-            st.markdown(f"<b>Current Shelf Qty:</b> {shelf_qty}", unsafe_allow_html=True)
-        with col3:
+            col1, col2, col3, col4 = st.columns([2, 2, 1.5, 1.2])
+
+            with col1:
+                st.markdown(
+                    f"**{name}**<br>"
+                    f"<span style='color:#bbb;font-size:0.92em'>Barcode:</span> "
+                    f"<span style='font-family:monospace;font-size:1em'>{barcode}</span>",
+                    unsafe_allow_html=True
+                )
+            with col2:
+                st.markdown(f"<b>Current Shelf Qty:</b> {shelf_qty}", unsafe_allow_html=True)
+            with col3:
+                new_qty = st.number_input(
+                    "Set shelf quantity",
+                    min_value=0,
+                    max_value=99999,
+                    value=shelf_qty,
+                    step=1,
+                    key=f"declare_{selected_locid}_{itemid}"
+                )
+            with col4:
+                if st.button("✅ Update", key=f"update_{selected_locid}_{itemid}"):
+                    handler.update_shelf_quantity(itemid, selected_locid, int(new_qty))
+                    if int(new_qty) == 0:
+                        st.success(f"'{name}' removed from shelf.")
+                    else:
+                        st.success(f"'{name}' shelf quantity set to {new_qty}.")
+                    st.rerun()
+
+        st.markdown(
+            "<div style='margin-top:2em;color:#bbb;font-size:1em'>"
+            "Set the quantity to <b>0</b> to remove the item from the shelf.<br>"
+            "Click ✅ Update to apply changes for each item."
+            "</div>", unsafe_allow_html=True
+        )
+
+with tab2:
+    st.markdown("### Bulk Change: Set shelf quantity for all items at a location")
+    selected_locid_bulk = st.selectbox(
+        "Select shelf location for bulk update:",
+        options=all_locids,
+        index=0,
+        key="bulk_locid_select"
+    )
+    items_in_loc_bulk = all_items_df[all_items_df["locid"] == selected_locid_bulk].copy()
+    if items_in_loc_bulk.empty:
+        st.info(f"No items currently on shelf `{selected_locid_bulk}`.")
+    else:
+        st.markdown(f"#### Set quantities below. Any item set to <b>0</b> will be dropped from shelf and moved to inventory.", unsafe_allow_html=True)
+        bulk_changes = {}
+        table_data = []
+        for idx, row in items_in_loc_bulk.iterrows():
+            itemid = row["itemid"]
+            name = row["name"]
+            barcode = row["barcode"]
+            shelf_qty = int(row["quantity"])
             new_qty = st.number_input(
-                "Set shelf quantity",
+                f"{name} ({barcode})",
                 min_value=0,
                 max_value=99999,
                 value=shelf_qty,
                 step=1,
-                key=f"declare_{selected_locid}_{itemid}"
+                key=f"bulkqty_{selected_locid_bulk}_{itemid}"
             )
-        with col4:
-            if st.button("✅ Update", key=f"update_{selected_locid}_{itemid}"):
-                handler.update_shelf_quantity(itemid, selected_locid, int(new_qty))
-                if int(new_qty) == 0:
-                    st.success(f"'{name}' removed from shelf.")
-                else:
-                    st.success(f"'{name}' shelf quantity set to {new_qty}.")
-                st.rerun()  # <--- The correct rerun call!
+            bulk_changes[itemid] = (shelf_qty, int(new_qty), name, barcode)
+
+        if st.button("💾 Apply Bulk Update", key="apply_bulk_update"):
+            changed = False
+            for itemid, (old_qty, new_qty, name, barcode) in bulk_changes.items():
+                if new_qty != old_qty:
+                    handler.update_shelf_quantity(itemid, selected_locid_bulk, new_qty)
+                    changed = True
+                    if new_qty == 0 and old_qty > 0:
+                        handler.return_to_inventory(itemid, old_qty)
+            if changed:
+                st.success("Bulk update applied successfully!")
+            else:
+                st.info("No changes detected.")
+            st.rerun()
+
+        # Table preview
+        preview_data = [
+            {
+                "Item Name": name,
+                "Barcode": barcode,
+                "Old Shelf Qty": old_qty,
+                "New Shelf Qty": new_qty
+            }
+            for itemid, (old_qty, new_qty, name, barcode) in bulk_changes.items()
+        ]
+        st.markdown("#### Bulk change preview")
+        st.dataframe(pd.DataFrame(preview_data), hide_index=True, use_container_width=True)
 
     st.markdown(
         "<div style='margin-top:2em;color:#bbb;font-size:1em'>"
-        "Set the quantity to <b>0</b> to remove the item from the shelf.<br>"
-        "Click ✅ Update to apply changes for each item."
+        "Set quantity to <b>0</b> to drop out an item from the shelf and return it to inventory.<br>"
+        "Click <b>Apply Bulk Update</b> to apply all changes at once."
         "</div>", unsafe_allow_html=True
     )
