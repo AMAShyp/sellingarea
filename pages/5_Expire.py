@@ -9,9 +9,12 @@ st.title("⏰ Near Expiry Shelf Items")
 
 try:
     shelf_handler = DatabaseManager()
-    shelf_df = shelf_handler.fetch_data(
-        "SELECT itemid, itemname AS itemname, quantity, expirationdate, locid FROM shelf WHERE quantity > 0"
-    )
+    shelf_df = shelf_handler.fetch_data("""
+        SELECT s.itemid, i.itemname AS itemname, s.quantity, s.expirationdate, s.locid
+        FROM shelf s
+        JOIN item i ON s.itemid = i.itemid
+        WHERE s.quantity > 0
+    """)
     st.write("DEBUG: shelf_df shape", shelf_df.shape)
     if shelf_df.empty:
         st.info("No items in the selling area.")
@@ -144,7 +147,6 @@ try:
                     "✅ No items are below the selected fraction of shelf life."
                 )
             else:
-                # --- MAP: highlight all locids with expiring items (any row in df) ---
                 hi_locs = sorted(set(alerts_frac_df["locid"].dropna().unique()))
                 st.markdown("#### 🗺️ Shelf Map: Red = shelves with near-expiry items (by shelf life %)")
                 st.plotly_chart(
