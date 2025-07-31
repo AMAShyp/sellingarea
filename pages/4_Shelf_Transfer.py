@@ -13,7 +13,7 @@ class ShelfTransferHandler(DatabaseManager):
             SELECT s.locid, i.itemid, i.itemnameenglish AS name, i.barcode, s.quantity
             FROM shelf s
             JOIN item i ON s.itemid = i.itemid
-            WHERE s.locid = %s
+            WHERE s.locid = %s AND s.quantity > 0
             ORDER BY i.itemnameenglish
         """
         df = self.fetch_data(q, (locid,))
@@ -70,7 +70,7 @@ with colB:
 
 source_items = handler.get_shelf_items(source_locid)
 if source_items.empty:
-    st.info(f"No items currently on shelf `{source_locid}`.")
+    st.info(f"No items with positive quantity currently on shelf `{source_locid}`.")
     st.stop()
 
 st.markdown(
@@ -84,6 +84,8 @@ for idx, row in source_items.iterrows():
     name = row["name"]
     barcode = row["barcode"]
     shelf_qty = int(row["quantity"])
+    if shelf_qty == 0:
+        continue  # extra guard, though SQL WHERE filters this too
     col1, col2, col3, col4 = st.columns([2, 2, 1.4, 1.4])
     with col1:
         st.markdown(
@@ -110,8 +112,16 @@ for idx, row in source_items.iterrows():
         "Transfer Qty": int(qty_to_transfer)
     })
 
+# Show only items with transfer > 0 in the preview
+preview_df = pd.DataFrame([
+    t for t in transfer_table if t["Transfer Qty"] > 0
+])
+
 st.markdown("#### Transfer preview")
-st.dataframe(pd.DataFrame(transfer_table), hide_index=True, use_container_width=True)
+if not preview_df.empty:
+    st.dataframe(preview_df, hide_index=True, use_container_width=True)
+else:
+    st.info("No items selected for transfer yet.")
 
 if st.button("🚚 Execute Transfer", type="primary"):
     any_transferred = False
@@ -138,8 +148,8 @@ if st.button("🚚 Execute Transfer", type="primary"):
 
 st.markdown(
     "<div style='margin-top:2em;color:#bbb;font-size:1em'>"
+    "Only items with a positive shelf quantity are shown.<br>"
     "Set transfer quantity for any items to move them from the source to the target shelf.<br>"
-    "Items set to zero will not be transferred.<br>"
     "If source quantity reaches zero, item will be removed from the source shelf."
     "</div>", unsafe_allow_html=True
 )
