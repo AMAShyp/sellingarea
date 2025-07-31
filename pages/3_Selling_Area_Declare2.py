@@ -1,6 +1,5 @@
 import streamlit as st
 from db_handler import DatabaseManager
-from shelf_map.shelf_map_handler import ShelfMapHandler
 import plotly.graph_objects as go
 
 try:
@@ -9,40 +8,35 @@ try:
 except ImportError:
     QR_AVAILABLE = False
 
+# ------------- DeclareHandler -------------
 class DeclareHandler(DatabaseManager):
     def get_item_by_barcode(self, barcode):
         df = self.fetch_data("""
             SELECT itemid, itemnameenglish AS name, barcode,
                    familycat, sectioncat, departmentcat, classcat
-            FROM item
-            WHERE barcode = %s
-            LIMIT 1
+            FROM item WHERE barcode = %s LIMIT 1
         """, (barcode,))
         return df.iloc[0] if not df.empty else None
 
     def get_shelf_entries(self, itemid):
         df = self.fetch_data("""
             SELECT locid, SUM(quantity) as qty
-            FROM shelf
-            WHERE itemid=%s
-            GROUP BY locid
-            ORDER BY locid
+            FROM shelf WHERE itemid=%s
+            GROUP BY locid ORDER BY locid
         """, (int(itemid),))
         return df
 
     def get_inventory_total(self, itemid):
         df = self.fetch_data("""
             SELECT SUM(quantity) as total
-            FROM inventory
-            WHERE itemid=%s AND quantity > 0
+            FROM inventory WHERE itemid=%s AND quantity > 0
         """, (int(itemid),))
         return int(df.iloc[0]['total']) if not df.empty and df.iloc[0]['total'] is not None else 0
 
     def subtract_inventory(self, itemid, qty):
         batches = self.fetch_data("""
             SELECT expirationdate, cost_per_unit, quantity
-            FROM inventory
-            WHERE itemid=%s AND quantity > 0
+            FROM inventory WHERE itemid=%s AND quantity > 0
             ORDER BY expirationdate ASC, cost_per_unit ASC
         """, (int(itemid),))
         left = qty
@@ -75,20 +69,22 @@ class DeclareHandler(DatabaseManager):
                 UPDATE shelf SET quantity=%s WHERE itemid=%s AND locid=%s
             """, (qty, int(itemid), locid))
 
-    def get_all_locids(self):
+    def get_all_locids_and_labels(self):
         df = self.fetch_data("""
-            SELECT locid FROM shelf_map_locations_2 ORDER BY locid
+            SELECT locid, label, x_pct, y_pct, w_pct, h_pct, COALESCE(rotation_deg,0) as rotation_deg
+            FROM shelf_map_location_2 ORDER BY locid
         """)
-        return df["locid"].tolist() if not df.empty else []
+        return df
 
-def map_with_labels_and_highlight(locs, highlight_locs, label_offset=0.018):
+# ------------- MAP WITH LABELS AND HIGHLIGHT -------------
+def map_with_labels_and_highlight(locs_df, highlight_locs, label_offset=0.018):
     import math
     shapes = []
     all_labels = []
     highlight_set = set(highlight_locs)
-    for row in locs:
+    for _, row in locs_df.iterrows():
         x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
-        deg = float(row.get("rotation_deg") or 0)
+        deg = float(row["rotation_deg"])
         cx, cy = x + w/2, 1 - (y + h/2)
         y_draw = 1 - y - h
         is_hi = row["locid"] in highlight_set
@@ -112,9 +108,8 @@ def map_with_labels_and_highlight(locs, highlight_locs, label_offset=0.018):
             "x": x + w/2,
             "y": 1 - (y + h/2),
             "highlight": is_hi,
-            "label": row.get("label", row["locid"])
+            "label": row["label"] if "label" in row and row["label"] else row["locid"]
         })
-
     fig = go.Figure()
     fig.update_layout(shapes=shapes, height=340, margin=dict(l=12,r=12,t=10,b=5),
                       plot_bgcolor="#f8f9fa")
@@ -135,11 +130,12 @@ def map_with_labels_and_highlight(locs, highlight_locs, label_offset=0.018):
         )
     return fig
 
+# ------------- MAIN STREAMLIT APP -------------
 st.set_page_config(layout="centered")
 st.title("🟢 Declare Selling Area Quantity (by Barcode, Map & Location)")
 
 handler = DeclareHandler()
-map_handler = ShelfMapHandler()
+locs_df = handler.get_all_locids_and_labels()
 
 st.markdown("""
 <style>
@@ -181,8 +177,7 @@ def declare_logic(barcode, reset_callback):
         itemid = int(item['itemid'])
         shelf_entries = handler.get_shelf_entries(itemid)
         inventory_total = handler.get_inventory_total(itemid)
-        all_locids = handler.get_all_locids()
-        shelfmap_locs = map_handler.get_locations()
+        all_locids = locs_df["locid"].tolist()
 
         prev_qty = 0
         prev_locid = ""
@@ -192,7 +187,6 @@ def declare_logic(barcode, reset_callback):
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
-        # Use autocomplete dropdown
         locid = st.selectbox(
             "Shelf Location (locid)",
             options=all_locids,
@@ -202,7 +196,7 @@ def declare_logic(barcode, reset_callback):
         )
 
         st.markdown("#### 📍 Shelf Location Map")
-        st.plotly_chart(map_with_labels_and_highlight(shelfmap_locs, [locid]), use_container_width=True, key="declare_map")
+        st.plotly_chart(map_with_labels_and_highlight(locs_df, [locid]), use_container_width=True, key="declare_map")
 
         st.info(f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
                 f"**Available in inventory:** {inventory_total}")
