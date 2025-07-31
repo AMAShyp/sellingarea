@@ -1,6 +1,5 @@
 import streamlit as st
 from db_handler import DatabaseManager
-# --- Add these imports:
 from shelf_map.shelf_map_handler import ShelfMapHandler
 import plotly.graph_objects as go
 
@@ -82,7 +81,7 @@ class DeclareHandler(DatabaseManager):
         """)
         return df["locid"].tolist() if not df.empty else []
 
-# ---- MAP UTILS from your previous logic ----
+# --- MAP rendering function ---
 def map_with_highlights(locs, highlight_locs, label_offset=0.018):
     import math
     shapes = []
@@ -129,13 +128,10 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
             )
     return fig
 
-# ----------------------------------
-
 st.set_page_config(layout="centered")
 st.title("🟢 Declare Selling Area Quantity (by Barcode)")
 
 handler = DeclareHandler()
-# ---- Instantiate your map handler ----
 map_handler = ShelfMapHandler()
 
 st.markdown("""
@@ -161,7 +157,7 @@ st.markdown("""
 
 tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 
-def declare_logic(barcode, reset_callback, show_map=False):
+def declare_logic(barcode, reset_callback):
     if not barcode:
         st.info("Please scan or enter the item barcode.")
         return
@@ -180,16 +176,14 @@ def declare_logic(barcode, reset_callback, show_map=False):
         inventory_total = handler.get_inventory_total(itemid)
         all_locids = handler.get_all_locids()
 
-        # -- Only for scanned barcode, show map with this item's locids highlighted --
-        if show_map:
-            shelf_locs = map_handler.get_locations()
-            # Highlight all shelf locations for this item:
-            highlight_locs = shelf_entries["locid"].tolist() if not shelf_entries.empty else []
-            if highlight_locs:
-                st.markdown("#### 🗺️ Shelf Map — highlighted locations for this item:")
-                st.plotly_chart(map_with_highlights(shelf_locs, highlight_locs), use_container_width=True, key="shelf_map_for_item")
-            else:
-                st.info("No shelf locations found for this item.")
+        # Show shelf map for this item after any valid scan or entry
+        shelf_locs = map_handler.get_locations()
+        highlight_locs = shelf_entries["locid"].tolist() if not shelf_entries.empty else []
+        if highlight_locs:
+            st.markdown("#### 🗺️ Shelf Map — highlighted locations for this item:")
+            st.plotly_chart(map_with_highlights(shelf_locs, highlight_locs), use_container_width=True, key="shelf_map_for_item")
+        else:
+            st.info("No shelf locations found for this item.")
 
         prev_qty = 0
         prev_locid = ""
@@ -250,12 +244,10 @@ with tab1:
         barcode = qrcode_scanner(key="barcode_cam") or ""
         if barcode:
             st.success(f"Scanned: {barcode}")
-        # -- Only show map if scanned --
-        declare_logic(barcode, reset_camera_scan, show_map=bool(barcode))
+        declare_logic(barcode, reset_camera_scan)
     else:
         st.warning("Camera scanning not available. Please use tab 2 or `pip install streamlit-qrcode-scanner`.")
 
 with tab2:
     barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
-    # Don't show map for manual input (can change this if desired)
-    declare_logic(barcode, lambda: reset_camera_scan(), show_map=False)
+    declare_logic(barcode, lambda: reset_camera_scan())
