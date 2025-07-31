@@ -90,7 +90,18 @@ class DeclareHandler(DatabaseManager):
     def get_all_locids(self):
         return sorted(FILTERED_LOCIDS)
 
-# --- MAP rendering function: scatter text labels ---
+    def get_items_at_location(self, locid):
+        # Returns all items at a given locid (filtered)
+        df = self.fetch_data("""
+            SELECT i.itemid, i.itemnameenglish AS name, i.barcode, s.quantity
+            FROM shelf s
+            JOIN item i ON s.itemid = i.itemid
+            WHERE s.locid = %s
+            AND s.quantity > 0
+            ORDER BY i.itemnameenglish
+        """, (locid,))
+        return df if not df.empty else pd.DataFrame(columns=["itemid", "name", "barcode", "quantity"])
+
 def map_with_highlights_and_textlabels(locs, highlight_locs, allowed_locids):
     import math
     shapes = []
@@ -135,7 +146,6 @@ def map_with_highlights_and_textlabels(locs, highlight_locs, allowed_locids):
             path = "M " + " L ".join(f"{x_},{y_}" for x_, y_ in abs_pts) + " Z"
             shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
 
-        # Add marker and label for text clickability
         trace_x.append(cx)
         trace_y.append(cy)
         trace_text.append(row.get("label", row["locid"]))
@@ -158,7 +168,6 @@ def map_with_highlights_and_textlabels(locs, highlight_locs, allowed_locids):
     fig = go.Figure()
     fig.update_layout(shapes=shapes, height=460, margin=dict(l=12,r=12,t=10,b=5),
                       plot_bgcolor="#f8f9fa")
-    # Zoom to filtered shelves
     if any_loc:
         expand_x = (max_x - min_x) * 0.07
         expand_y = (max_y - min_y) * 0.07
@@ -167,7 +176,6 @@ def map_with_highlights_and_textlabels(locs, highlight_locs, allowed_locids):
     else:
         fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
         fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
-    # Add invisible scatter for clickability
     fig.add_scatter(
         x=trace_x, y=trace_y, text=trace_text,
         mode="markers",
@@ -175,7 +183,6 @@ def map_with_highlights_and_textlabels(locs, highlight_locs, allowed_locids):
         hoverinfo="text",
         name="Shelves"
     )
-    # Add scatter text labels for each allowed cell
     fig.add_scatter(
         x=label_x, y=label_y, text=label_text,
         mode="text",
@@ -214,14 +221,31 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+if "latest_declaration" not in st.session_state:
+    st.session_state["latest_declaration"] = {}
+if "latest_itemid" not in st.session_state:
+    st.session_state["latest_itemid"] = None
+
 tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 
 def declare_logic(barcode, reset_callback):
+    item = None
+    itemid = None
+
+    if barcode:
+        item = handler.get_item_by_barcode(barcode)
+        if item is not None:
+            itemid = int(item['itemid'])
+
+    # If new item scanned/entered, clear previous declaration message
+    if itemid is not None and st.session_state.get("latest_itemid") != itemid:
+        st.session_state["latest_declaration"] = {}
+        st.session_state["latest_itemid"] = itemid
+
     if not barcode:
         st.info("Please scan or enter the item barcode.")
         return
 
-    item = handler.get_item_by_barcode(barcode)
     if item is not None:
         st.markdown(f"**Item:** {item['name']}<br>🔖 Barcode: `{item['barcode']}`", unsafe_allow_html=True)
         st.markdown(
@@ -230,7 +254,6 @@ def declare_logic(barcode, reset_callback):
             f"<div class='catline'><span class='cat-sect'>Section:</span> <span class='cat-val'>{item['sectioncat']}</span></div>"
             f"<div class='catline'><span class='cat-family'>Family:</span> <span class='cat-val'>{item['familycat']}</span></div>",
             unsafe_allow_html=True)
-        itemid = int(item['itemid'])
         shelf_entries = handler.get_shelf_entries(itemid)
         inventory_total = handler.get_inventory_total(itemid)
         all_locids = handler.get_all_locids()
@@ -276,14 +299,17 @@ def declare_logic(barcode, reset_callback):
         new_qty = st.number_input("Declare current selling area quantity", min_value=0, value=prev_qty, step=1, key="declare_qty")
 
         col1, col2 = st.columns([2,1])
+        confirm_clicked = False
         with col1:
             confirm = st.button("✅ Confirm Declaration", type="primary")
+            if confirm:
+                confirm_clicked = True
         with col2:
             if st.button("🔄 New Scan", type="secondary"):
                 reset_callback()
                 st.rerun()
 
-        if confirm:
+        if confirm_clicked:
             diff = new_qty - prev_qty
             if diff > 0:
                 actual_subtracted = handler.subtract_inventory(itemid, diff)
@@ -292,9 +318,50 @@ def declare_logic(barcode, reset_callback):
                 st.info("Declared quantity is less than previous; only updating shelf record, not adding back to inventory.")
             handler.set_shelf_quantity(itemid, locid, new_qty)
             st.success(f"Selling area quantity for '{item['name']}' at {locid} is now {new_qty}.")
-            st.rerun()
+            st.session_state["latest_declaration"] = {
+                "itemid": itemid,
+                "itemname": item['name'],
+                "barcode": item['barcode'],
+                "locid": locid,
+                "qty": new_qty
+            }
+
     elif barcode.strip():
         st.error("❌ Barcode not found in the item table.")
+
+def show_latest_declaration_and_items():
+    latest = st.session_state.get("latest_declaration")
+    if latest and "itemid" in latest:
+        st.markdown(
+            f"""<div style='background:#e7f8e9;border:1.5px solid #47bd72;
+                  border-radius:0.5em;padding:0.65em 1em 0.6em 1em;
+                  margin-top:1em;font-size:1.09em;'>
+                <b>Latest Declaration:</b><br>
+                <b>Item:</b> <span style='color:#1c4680'>{latest["itemname"]}</span><br>
+                <b>Barcode:</b> <span style='color:#222;font-family:monospace'>{latest["barcode"]}</span><br>
+                <b>Location:</b> <span style='color:#098A23'>{latest["locid"]}</span><br>
+                <b>Quantity:</b> <span style='color:#C61C1C'>{latest["qty"]}</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        # Show all items at this location in a table
+        handler = DeclareHandler()
+        items_at_location = handler.get_items_at_location(latest["locid"])
+        if not items_at_location.empty:
+            st.markdown(f"<br/><b>All items at location <span style='color:#098A23'>{latest['locid']}</span>:</b>", unsafe_allow_html=True)
+            st.dataframe(
+                items_at_location.rename(columns={
+                    "itemid": "Item ID",
+                    "name": "Item Name",
+                    "barcode": "Barcode",
+                    "quantity": "Shelf Quantity"
+                }),
+                hide_index=True,
+                use_container_width=True
+            )
+        else:
+            st.info("No items currently in this shelf location.")
 
 def reset_camera_scan():
     for k in ["barcode_cam", "barcode_input", "declare_qty", "declare_locid"]:
@@ -315,3 +382,5 @@ with tab1:
 with tab2:
     barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
     declare_logic(barcode, lambda: reset_camera_scan())
+
+show_latest_declaration_and_items()
