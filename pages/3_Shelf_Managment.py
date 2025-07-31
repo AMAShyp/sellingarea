@@ -76,7 +76,12 @@ else:
         col1, col2, col3, col4 = st.columns([2, 2, 1.5, 1.2])
 
         with col1:
-            st.markdown(f"**{name}**<br><span style='color:#bbb;font-size:0.92em'>Barcode:</span> <span style='font-family:monospace;font-size:1em'>{barcode}</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"**{name}**<br>"
+                f"<span style='color:#bbb;font-size:0.92em'>Barcode:</span> "
+                f"<span style='font-family:monospace;font-size:1em'>{barcode}</span>",
+                unsafe_allow_html=True
+            )
         with col2:
             st.markdown(f"<b>Current Shelf Qty:</b> {shelf_qty}", unsafe_allow_html=True)
         with col3:
@@ -95,7 +100,7 @@ else:
                     st.success(f"'{name}' removed from shelf.")
                 else:
                     st.success(f"'{name}' shelf quantity set to {new_qty}.")
-                st.experimental_rerun()
+                st.rerun()  # <--- The correct rerun call!
 
     st.markdown(
         "<div style='margin-top:2em;color:#bbb;font-size:1em'>"
