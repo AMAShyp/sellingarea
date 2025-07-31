@@ -54,9 +54,9 @@ class DeclareHandler(DatabaseManager):
         return qty - left
 
     def set_shelf_quantity(self, itemid, locid, qty):
-        # ONLY allow locids that are present in shelf_map_locations_2!
+        # ONLY allow locids that are present in shelf_map_locations!
         valid = self.fetch_data(
-            "SELECT locid FROM shelf_map_locations_2 WHERE locid=%s",
+            "SELECT locid FROM shelf_map_locations WHERE locid=%s",
             (locid,)
         )
         if valid.empty:
