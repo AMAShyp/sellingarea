@@ -1,173 +1,261 @@
-import streamlit as st
+# selling_area/shelf_handler.py
 import pandas as pd
-from datetime import date
-from selling_area.shelf_handler import ShelfHandler
-from shelf_map.shelf_map_handler import ShelfMapHandler
-import plotly.graph_objects as go
+from db_handler import DatabaseManager
 
-def map_with_highlights(locs, highlight_locs, color="#d8000c", alpha=0.32):
-    import math
-    shapes = []
-    for row in locs:
-        x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
-        deg = float(row.get("rotation_deg") or 0)
-        cx, cy = x + w/2, 1 - (y + h/2)
-        y_draw = 1 - y - h
-        is_hi = row["locid"] in highlight_locs
-        fill = f"rgba(220,53,69,{alpha})" if is_hi else "rgba(180,180,180,0.09)"
-        line = dict(width=2 if is_hi else 1.2, color=color if is_hi else "#888")
-        if deg == 0:
-            shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
-        else:
-            rad = math.radians(deg)
-            cos, sin = math.cos(rad), math.sin(rad)
-            pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
-            path = "M " + " L ".join(f"{cx+u*cos-v*sin},{cy+u*sin+v*cos}" for u, v in pts) + " Z"
-            shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
-        if is_hi:
-            r = max(w, h) * 0.5
-            shapes.append(dict(type="circle",xref="x",yref="y",
-                               x0=cx-r,x1=cx+r,y0=cy-r,y1=cy+r,
-                               line=dict(color=color,width=2,dash="dot")))
-    fig = go.Figure()
-    fig.update_layout(shapes=shapes, height=330, margin=dict(l=12,r=12,t=10,b=5),
-                      plot_bgcolor="#f8f9fa")
-    fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
-    fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
-    for row in locs:
-        if row["locid"] in highlight_locs:
-            x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
-            fig.add_annotation(
-                x=x + w/2,
-                y=1 - (y + h/2) + 0.012,
-                text=row.get("label",row["locid"]),
-                showarrow=False,
-                font=dict(size=11, color="#c90000", family="monospace"),
-                align="center",
-                bgcolor="rgba(255,255,255,0.92)",
-                bordercolor="#d8000c",
-                borderpad=2,
-                opacity=0.97,
+class ShelfHandler(DatabaseManager):
+    """Handles database operations related to the Shelf (Selling Area)."""
+
+    # ───────────────────────── shelf queries ─────────────────────────
+    def get_shelf_items(self):
+        query = """
+        SELECT 
+            s.shelfid,
+            s.itemid,
+            i.itemnameenglish AS itemname,
+            s.quantity,
+            s.expirationdate,
+            s.cost_per_unit,
+            s.lastupdated,
+            s.locid
+        FROM   shelf s
+        JOIN   item  i ON s.itemid = i.itemid
+        ORDER  BY s.locid, i.itemnameenglish, s.expirationdate;
+        """
+        return self.fetch_data(query)
+
+    # ─────────────────────── add / update shelf (single call) ──────────────────
+    def add_to_shelf(
+        self,
+        itemid: int,
+        expirationdate,
+        quantity: int,
+        created_by: str,
+        cost_per_unit: float,
+        locid: str = None,
+        cur=None  # ← optional open cursor for transaction use
+    ):
+        """
+        Upserts into Shelf and logs to ShelfEntries.
+        If `cur` is supplied, uses that cursor (no commit); otherwise
+        opens its own cursor/commit for backward compatibility.
+        """
+        own_cursor = False
+        if cur is None:
+            self._ensure_live_conn()
+            cur = self.conn.cursor()
+            own_cursor = True
+
+        itemid_py   = int(itemid)
+        qty_py      = int(quantity)
+        cost_py     = float(cost_per_unit)
+
+        # Upsert shelf row (unique on item+expiry+cost+locid)
+        cur.execute(
+            """
+            INSERT INTO shelf (itemid, expirationdate, quantity, cost_per_unit, locid)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (itemid, expirationdate, cost_per_unit, locid)
+            DO UPDATE SET quantity    = shelf.quantity + EXCLUDED.quantity,
+                          lastupdated = CURRENT_TIMESTAMP;
+            """,
+            (itemid_py, expirationdate, qty_py, cost_py, locid),
+        )
+
+        # Movement log
+        cur.execute(
+            """
+            INSERT INTO shelfentries (itemid, expirationdate, quantity, createdby, locid)
+            VALUES (%s, %s, %s, %s, %s);
+            """,
+            (itemid_py, expirationdate, qty_py, created_by, locid),
+        )
+
+        if own_cursor:
+            self.conn.commit()
+            cur.close()
+
+    # ───────────────────── inventory look-ups ───────────────────────
+    def get_inventory_items(self):
+        query = """
+        SELECT 
+            inv.itemid,
+            i.itemnameenglish AS itemname,
+            inv.quantity,
+            inv.expirationdate,
+            inv.storagelocation,
+            inv.cost_per_unit
+        FROM   inventory inv
+        JOIN   item       i ON inv.itemid = i.itemid
+        WHERE  inv.quantity > 0
+        ORDER  BY i.itemnameenglish, inv.expirationdate;
+        """
+        return self.fetch_data(query)
+
+    # ───────────────────── fast transfer from inventory ─────────────
+    def transfer_from_inventory(
+        self,
+        itemid: int,
+        expirationdate,
+        quantity: int,
+        cost_per_unit: float,
+        created_by: str,
+        locid: str = None
+    ):
+        """
+        Moves a specific cost layer (item + expiry + cost) 
+        from Inventory → Shelf in ONE transaction (one commit).
+        """
+        itemid_py   = int(itemid)
+        qty_py      = int(quantity)
+        cost_py     = float(cost_per_unit)
+
+        self._ensure_live_conn()
+        # one BEGIN / COMMIT block
+        with self.conn:
+            with self.conn.cursor() as cur:
+                # 1. Decrement that exact layer in inventory
+                cur.execute(
+                    """
+                    UPDATE inventory
+                    SET    quantity = quantity - %s
+                    WHERE  itemid         = %s
+                      AND  expirationdate = %s
+                      AND  cost_per_unit  = %s
+                      AND  quantity >= %s;
+                    """,
+                    (qty_py, itemid_py, expirationdate, cost_py, qty_py),
+                )
+
+                # 2. Upsert into shelf + log entry (reuse same cursor, no extra commit)
+                self.add_to_shelf(
+                    itemid_py,
+                    expirationdate,
+                    qty_py,
+                    created_by,
+                    cost_py,
+                    locid,
+                    cur=cur,          # ← use existing cursor
+                )
+
+    # ───────────────────── alerts / misc helpers ────────────────────
+    def get_low_shelf_stock(self, threshold=10):
+        query = """
+        SELECT 
+            s.itemid,
+            i.itemnameenglish AS itemname,
+            s.quantity,
+            s.expirationdate,
+            s.locid
+        FROM   shelf s
+        JOIN   item  i ON s.itemid = i.itemid
+        WHERE  s.quantity <= %s
+        ORDER  BY s.locid, s.quantity ASC;
+        """
+        return self.fetch_data(query, (threshold,))
+
+    def get_inventory_by_barcode(self, barcode):
+        query = """
+        SELECT 
+            inv.itemid,
+            i.itemnameenglish AS itemname,
+            inv.quantity,
+            inv.expirationdate,
+            inv.cost_per_unit,
+            inv.storagelocation
+        FROM   inventory inv
+        JOIN   item       i ON inv.itemid = i.itemid
+        WHERE  i.barcode = %s AND inv.quantity > 0
+        ORDER  BY inv.expirationdate;
+        """
+        return self.fetch_data(query, (barcode,))
+
+    # -------------- item master helpers (unchanged) -----------------
+    def get_all_items(self):
+        query = """
+        SELECT 
+            itemid,
+            itemnameenglish AS itemname,
+            shelfthreshold,
+            shelfaverage
+        FROM item
+        ORDER BY itemnameenglish;
+        """
+        df = self.fetch_data(query)
+        if not df.empty:
+            df["shelfthreshold"] = df["shelfthreshold"].astype("Int64")
+            df["shelfaverage"]   = df["shelfaverage"].astype("Int64")
+        return df
+
+    def update_shelf_settings(self, itemid, new_threshold, new_average):
+        query = """
+        UPDATE item
+        SET    shelfthreshold = %s,
+               shelfaverage   = %s
+        WHERE  itemid = %s;
+        """
+        self.execute_command(query, (int(new_threshold), int(new_average), int(itemid)))
+
+    def get_shelf_quantity_by_item(self):
+        query = """
+        SELECT 
+            i.itemid,
+            i.itemnameenglish AS itemname,
+            COALESCE(SUM(s.quantity), 0) AS totalquantity,
+            i.shelfthreshold,
+            i.shelfaverage
+        FROM   item  i
+        LEFT JOIN shelf s ON i.itemid = s.itemid
+        GROUP  BY i.itemid, i.itemnameenglish, i.shelfthreshold, i.shelfaverage
+        ORDER  BY i.itemnameenglish;
+        """
+        df = self.fetch_data(query)
+        if not df.empty:
+            df["shelfthreshold"] = df["shelfthreshold"].astype("Int64")
+            df["shelfaverage"]   = df["shelfaverage"].astype("Int64")
+            df["totalquantity"]  = df["totalquantity"].astype(int)
+        return df
+
+# ───────── shortage resolver (transfer side) ─────────
+    def resolve_shortages(self, *, itemid: int, qty_need: int, user: str) -> int:
+        """
+        Consume open shortages for this itemid (oldest first).
+        Returns the qty still left to put on shelf.
+        """
+        rows = self.fetch_data(
+            """
+            SELECT shortageid, shortage_qty
+            FROM   shelf_shortage
+            WHERE  itemid = %s AND resolved = FALSE
+            ORDER  BY logged_at
+            """,
+            (itemid,),
+        )
+
+        remaining = qty_need
+        for r in rows.itertuples():
+            if remaining == 0:
+                break
+            take = min(remaining, int(r.shortage_qty))
+
+            # shrink or resolve the shortage row
+            self.execute_command(
+                """
+                UPDATE shelf_shortage
+                SET    shortage_qty = shortage_qty - %s,
+                       resolved      = (shortage_qty - %s = 0),
+                       resolved_qty  = COALESCE(resolved_qty,0) + %s,
+                       resolved_at   = CASE
+                                         WHEN shortage_qty - %s = 0
+                                         THEN CURRENT_TIMESTAMP
+                                       END,
+                       resolved_by   = %s
+                WHERE  shortageid = %s
+                """,
+                (take, take, take, take, user, r.shortageid),
             )
-    return fig
+            remaining -= take
 
-st.set_page_config(page_title="Near Expiry Items", layout="wide")
-st.title("⏰ Near Expiry Shelf Items")
+        # optional tidy-up of zero rows
+        self.execute_command("DELETE FROM shelf_shortage WHERE shortage_qty = 0;")
 
-try:
-    shelf_handler = ShelfHandler()
-    shelf_df = shelf_handler.get_shelf_items()
-    st.write("DEBUG: Raw shelf_df columns", list(shelf_df.columns))
-    st.write("DEBUG: Raw shelf_df sample", shelf_df.head())
-    shelf_df.columns = [c.lower() for c in shelf_df.columns]
-    st.write("DEBUG: shelf_df (lower-case) columns", list(shelf_df.columns))
-    if shelf_df.empty:
-        st.info("No items in the selling area.")
-        st.stop()
-
-    # Defensive debug: make sure locid exists
-    if "locid" not in shelf_df.columns:
-        st.error("❌ 'locid' is missing from your shelf query. Check your ShelfHandler SQL!")
-        st.stop()
-    # Map handler and locations
-    map_handler = ShelfMapHandler()
-    shelf_locs = map_handler.get_locations()
-    st.write("DEBUG: Map shelf_locs count", len(shelf_locs))
-    if len(shelf_locs) > 0:
-        st.write("DEBUG: Map shelf_locs sample", pd.DataFrame(shelf_locs).head())
-
-    today = pd.to_datetime(date.today())
-    shelf_df["expirationdate"] = pd.to_datetime(shelf_df["expirationdate"])
-    shelf_df["days_left"] = (shelf_df["expirationdate"] - today).dt.days
-
-    # bring shelf-life info
-    item_df = shelf_handler.fetch_data("SELECT itemid, shelflife FROM item")
-    st.write("DEBUG: Raw item_df columns", list(item_df.columns))
-    st.write("DEBUG: Raw item_df sample", item_df.head())
-    item_df.columns = [c.lower() for c in item_df.columns]
-    st.write("DEBUG: item_df (lower-case) columns", list(item_df.columns))
-    shelf_df = shelf_df.merge(item_df, on="itemid", how="left")
-    st.write("DEBUG: shelf_df after merge columns", list(shelf_df.columns))
-    st.write("DEBUG: shelf_df after merge sample", shelf_df.head())
-
-    subtab_days, subtab_percent = st.tabs(["📅 Days-Based", "📐 Shelf Life %"])
-
-    # SUBTAB A: Days-Based
-    with subtab_days:
-        st.markdown("#### ⚙️ Customize Alert Thresholds (Days)")
-
-        col_red, col_orange, col_green = st.columns(3)
-        red_days = col_red.number_input(
-            "🔴 Red (≤ days)", min_value=1, value=7, step=1
-        )
-        orange_days = col_orange.number_input(
-            "🟠 Orange (≤ days)",
-            min_value=red_days + 1,
-            value=max(30, red_days + 1),
-            step=1,
-        )
-        green_days = col_green.number_input(
-            "🟢 Green (≤ days)",
-            min_value=orange_days + 1,
-            value=max(85, orange_days + 1),
-            step=1,
-        )
-
-        near_expiry_df = shelf_df[shelf_df["days_left"] <= green_days].copy()
-        st.write("DEBUG: near_expiry_df columns", list(near_expiry_df.columns))
-        st.write("DEBUG: near_expiry_df sample", near_expiry_df.head())
-        if near_expiry_df.empty:
-            st.success(
-                f"✅ No items expiring within {green_days} days."
-            )
-        else:
-            hi_locs = sorted(set(near_expiry_df["locid"].dropna().unique()))
-            st.markdown("#### 🗺️ Shelf Map: Red = shelves with near-expiry items")
-            st.plotly_chart(map_with_highlights(shelf_locs, hi_locs), use_container_width=True)
-
-            def color_days(val: int) -> str:
-                if val <= red_days:
-                    return "background-color: red; color: white;"
-                if val <= orange_days:
-                    return "background-color: orange;"
-                if val <= green_days:
-                    return "background-color: green; color: white;"
-                return ""
-
-            styled = near_expiry_df[
-                ["itemname", "quantity", "expirationdate", "days_left"]
-            ].style.map(color_days, subset=["days_left"])
-
-            st.warning(
-                f"⚠️ Items expiring within {green_days} days:"
-            )
-            st.write(styled)
-
-            st.info(
-                "🔎 **Color-Coding (Days)**\n"
-                f"- 🔴 ≤ {red_days} days left\n"
-                f"- 🟠 {red_days + 1}-{orange_days} days left\n"
-                f"- 🟢 {orange_days + 1}-{green_days} days left"
-            )
-
-    # SUBTAB B: Shelf Life Fraction
-    with subtab_percent:
-        st.markdown(
-            "#### ⚙️ Customize Alert Thresholds (Fraction of Shelf Life)"
-        )
-
-        col_r, col_o, col_g = st.columns(3)
-        red_frac = col_r.number_input(
-            "🔴 Red (≤ fraction)",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.20,
-            step=0.05,
-            format="%.2f",
-        )
-        orange_frac = col_o.number_input(
-            "🟠 Orange (≤ fraction)",
-            min_value=red_frac + 0.01,
-            max_value=1.0,
-            value=max(0.40, red_frac + 0.01),
-            step=0.05,
+        return remaining
