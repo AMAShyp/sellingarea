@@ -120,7 +120,6 @@ def map_with_labels_and_highlight(locs, highlight_locs, label_offset=0.018):
                       plot_bgcolor="#f8f9fa")
     fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
-    # Draw all labels (grey by default, red if highlight)
     for label in all_labels:
         fig.add_annotation(
             x=label["x"],
@@ -193,22 +192,17 @@ def declare_logic(barcode, reset_callback):
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
-        locid = st.text_input(
+        # Use autocomplete dropdown
+        locid = st.selectbox(
             "Shelf Location (locid)",
-            value=prev_locid,
+            options=all_locids,
+            index=all_locids.index(prev_locid) if prev_locid in all_locids else 0,
             key="declare_locid",
-            max_chars=32,
-            help="Start typing to see suggested locations."
+            help="Select the shelf location."
         )
-        highlight = [locid] if locid and locid in [l['locid'] for l in shelfmap_locs] else []
-        st.markdown("#### 📍 Shelf Location Map")
-        st.plotly_chart(map_with_labels_and_highlight(shelfmap_locs, highlight), use_container_width=True, key="declare_map")
 
-        loc_suggestions = [x for x in all_locids if locid.strip().lower() in x.lower()][:8] if locid else all_locids[:8]
-        if locid and locid not in all_locids and loc_suggestions:
-            st.caption("Closest matches: " + ", ".join(f"`{l}`" for l in loc_suggestions))
-        elif not locid and all_locids:
-            st.caption("Sample locations: " + ", ".join(f"`{l}`" for l in all_locids[:8]))
+        st.markdown("#### 📍 Shelf Location Map")
+        st.plotly_chart(map_with_labels_and_highlight(shelfmap_locs, [locid]), use_container_width=True, key="declare_map")
 
         st.info(f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
                 f"**Available in inventory:** {inventory_total}")
