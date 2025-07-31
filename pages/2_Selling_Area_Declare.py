@@ -73,6 +73,12 @@ class DeclareHandler(DatabaseManager):
                 UPDATE shelf SET quantity=%s WHERE itemid=%s AND locid=%s
             """, (qty, int(itemid), locid))
 
+    def get_all_locids(self):
+        df = self.fetch_data("""
+            SELECT locid FROM shelf_map_location_2 ORDER BY locid
+        """)
+        return df["locid"].tolist() if not df.empty else []
+
 st.set_page_config(layout="centered")
 st.title("🟢 Declare Selling Area Quantity (by Barcode)")
 
@@ -118,23 +124,29 @@ def declare_logic(barcode, reset_callback):
         itemid = int(item['itemid'])
         shelf_entries = handler.get_shelf_entries(itemid)
         inventory_total = handler.get_inventory_total(itemid)
+        all_locids = handler.get_all_locids()
 
+        prev_qty = 0
+        prev_locid = ""
         if shelf_entries.empty:
             st.warning("No previous quantity declared for this item in the selling area.")
-            default_locid = st.text_input("Shelf Location (locid)", key="declare_locid", max_chars=32)
-            if not default_locid:
-                st.stop()
-            prev_qty = 0
-            locations = [default_locid]
         else:
-            locations = shelf_entries['locid'].tolist()
+            prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
-        if len(locations) > 1:
-            locid = st.selectbox("Shelf Location (locid)", locations)
-            prev_qty = int(shelf_entries[shelf_entries['locid'] == locid]['qty'].iloc[0])
-        else:
-            locid = locations[0]
+        # Location autocomplete: filter as you type, allows new or existing locations
+        locid = st.text_input(
+            "Shelf Location (locid)",
+            value=prev_locid,
+            key="declare_locid",
+            max_chars=32,
+            help="Start typing to see suggested locations."
+        )
+        loc_suggestions = [x for x in all_locids if locid.strip().lower() in x.lower()][:8] if locid else all_locids[:8]
+        if locid and locid not in all_locids and loc_suggestions:
+            st.caption("Closest matches: " + ", ".join(f"`{l}`" for l in loc_suggestions))
+        elif not locid and all_locids:
+            st.caption("Sample locations: " + ", ".join(f"`{l}`" for l in all_locids[:8]))
 
         st.info(f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
                 f"**Available in inventory:** {inventory_total}")
