@@ -238,12 +238,13 @@ def declare_logic(barcode, reset_callback):
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
+        # Searchable selectbox for location input
         locid = st.selectbox(
             "Shelf Location (locid)",
             options=all_locids,
             index=all_locids.index(prev_locid) if prev_locid in all_locids else 0 if all_locids else 0,
             key="declare_locid",
-            help="Start typing to search and select the shelf location."
+            help="Type or pick from the list. Press Enter to confirm your choice."
         ) if all_locids else st.text_input("Shelf Location (locid)", key="declare_locid", max_chars=32)
 
         st.info(f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
