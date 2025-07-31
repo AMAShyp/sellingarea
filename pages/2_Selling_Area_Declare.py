@@ -38,6 +38,7 @@ class DeclareHandler(DatabaseManager):
             FROM shelf
             WHERE itemid=%s
             GROUP BY locid
+            HAVING SUM(quantity) > 0
             ORDER BY locid
         """, (int(itemid),))
         return df[df["locid"].isin(FILTERED_LOCIDS)] if not df.empty else df
@@ -78,26 +79,30 @@ class DeclareHandler(DatabaseManager):
             (int(itemid), locid)
         )
         if exists.empty:
-            self.execute_command("""
-                INSERT INTO shelf (itemid, expirationdate, quantity, cost_per_unit, locid)
-                VALUES (%s, CURRENT_DATE, %s, 0, %s)
-            """, (int(itemid), qty, locid))
+            if qty > 0:
+                self.execute_command("""
+                    INSERT INTO shelf (itemid, expirationdate, quantity, cost_per_unit, locid)
+                    VALUES (%s, CURRENT_DATE, %s, 0, %s)
+                """, (int(itemid), qty, locid))
         else:
-            self.execute_command("""
-                UPDATE shelf SET quantity=%s WHERE itemid=%s AND locid=%s
-            """, (qty, int(itemid), locid))
+            if qty > 0:
+                self.execute_command("""
+                    UPDATE shelf SET quantity=%s WHERE itemid=%s AND locid=%s
+                """, (qty, int(itemid), locid))
+            else:
+                self.execute_command("""
+                    DELETE FROM shelf WHERE itemid=%s AND locid=%s
+                """, (int(itemid), locid))
 
     def get_all_locids(self):
         return sorted(FILTERED_LOCIDS)
 
     def get_items_at_location(self, locid):
-        # Returns all items at a given locid (filtered)
         df = self.fetch_data("""
             SELECT i.itemid, i.itemnameenglish AS name, i.barcode, s.quantity
             FROM shelf s
             JOIN item i ON s.itemid = i.itemid
-            WHERE s.locid = %s
-            AND s.quantity > 0
+            WHERE s.locid = %s AND s.quantity > 0
             ORDER BY i.itemnameenglish
         """, (locid,))
         return df if not df.empty else pd.DataFrame(columns=["itemid", "name", "barcode", "quantity"])
@@ -345,9 +350,10 @@ def show_latest_declaration_and_items():
             """,
             unsafe_allow_html=True
         )
-        # Show all items at this location in a table
         handler = DeclareHandler()
         items_at_location = handler.get_items_at_location(latest["locid"])
+        # --- Hide any with zero quantity (should never occur, but extra safe) ---
+        items_at_location = items_at_location[items_at_location["quantity"] > 0]
         if not items_at_location.empty:
             st.markdown(f"<br/><b>All items at location <span style='color:#098A23'>{latest['locid']}</span>:</b>", unsafe_allow_html=True)
             st.dataframe(
