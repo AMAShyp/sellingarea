@@ -17,6 +17,9 @@ class ShelfManagementHandler(DatabaseManager):
             ORDER BY s.locid, i.itemnameenglish
         """
         df = self.fetch_data(q, (list(locids),))
+        # --- Only keep items with positive quantity ---
+        if not df.empty:
+            df = df[df["quantity"] > 0]
         return df if not df.empty else pd.DataFrame(columns=["locid", "itemid", "name", "barcode", "quantity"])
 
     def update_shelf_quantity(self, itemid, locid, new_qty):
@@ -65,10 +68,10 @@ st.title("🗄️ Bulk Shelf Items Management")
 handler = ShelfManagementHandler()
 
 all_locids = handler.get_all_locids()
-all_items_df = handler.get_all_shelf_items(all_locids)
+all_items_df = handler.get_all_shelf_items(all_locids)   # <<-- Items with 0 already filtered out
 
 if all_items_df.empty:
-    st.info("No items found in the filtered shelves.")
+    st.info("No items with positive quantity found in the filtered shelves.")
     st.stop()
 
 selected_locid = st.selectbox(
@@ -79,7 +82,7 @@ selected_locid = st.selectbox(
 
 items_in_loc = all_items_df[all_items_df["locid"] == selected_locid].copy()
 if items_in_loc.empty:
-    st.info(f"No items currently on shelf `{selected_locid}`.")
+    st.info(f"No items with positive quantity currently on shelf `{selected_locid}`.")
 else:
     st.markdown("<b>Set a general quantity for ALL items below (overrides individual boxes):</b>", unsafe_allow_html=True)
     general_qty = st.number_input(
@@ -126,7 +129,7 @@ else:
             st.info("No changes detected.")
         st.rerun()
 
-    # Table preview
+    # Table preview: only items that would remain with positive qty or whose qty is being changed
     preview_data = [
         {
             "Item Name": name,
@@ -135,12 +138,17 @@ else:
             "New Shelf Qty": new_qty
         }
         for itemid, (old_qty, new_qty, name, barcode) in bulk_changes.items()
+        if old_qty > 0 or new_qty > 0
     ]
-    st.markdown("#### Bulk change preview")
-    st.dataframe(pd.DataFrame(preview_data), hide_index=True, use_container_width=True)
+    if preview_data:
+        st.markdown("#### Bulk change preview")
+        st.dataframe(pd.DataFrame(preview_data), hide_index=True, use_container_width=True)
+    else:
+        st.info("All items would be removed from the shelf.")
 
 st.markdown(
     "<div style='margin-top:2em;color:#bbb;font-size:1em'>"
+    "Items with 0 shelf quantity are hidden.<br>"
     "Set general quantity for all, or adjust individuals below.<br>"
     "Set quantity to <b>0</b> to drop out an item from the shelf and return it to inventory.<br>"
     "Click <b>Apply Bulk Update</b> to apply all changes at once."
