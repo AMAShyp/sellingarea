@@ -91,16 +91,16 @@ class DeclareHandler(DatabaseManager):
         return sorted(FILTERED_LOCIDS)
 
     def get_items_at_location(self, locid):
+        # Returns all items at a given locid (filtered)
         df = self.fetch_data("""
-            SELECT s.itemid, i.itemnameenglish AS name, i.barcode, SUM(s.quantity) AS qty
+            SELECT i.itemid, i.itemnameenglish AS name, i.barcode, s.quantity
             FROM shelf s
-            JOIN item i ON i.itemid = s.itemid
+            JOIN item i ON s.itemid = i.itemid
             WHERE s.locid = %s
-            GROUP BY s.itemid, i.itemnameenglish, i.barcode
-            HAVING SUM(s.quantity) > 0
+            AND s.quantity > 0
             ORDER BY i.itemnameenglish
         """, (locid,))
-        return df if not df.empty else pd.DataFrame(columns=["itemid", "name", "barcode", "qty"])
+        return df if not df.empty else pd.DataFrame(columns=["itemid", "name", "barcode", "quantity"])
 
 def map_with_highlights_and_textlabels(locs, highlight_locs, allowed_locids):
     import math
@@ -326,7 +326,10 @@ def declare_logic(barcode, reset_callback):
                 "qty": new_qty
             }
 
-def show_latest_declaration_and_location_table():
+    elif barcode.strip():
+        st.error("❌ Barcode not found in the item table.")
+
+def show_latest_declaration_and_items():
     latest = st.session_state.get("latest_declaration")
     if latest and "itemid" in latest:
         st.markdown(
@@ -342,19 +345,23 @@ def show_latest_declaration_and_location_table():
             """,
             unsafe_allow_html=True
         )
-        # Show all items at this location
+        # Show all items at this location in a table
         handler = DeclareHandler()
-        locid = latest["locid"]
-        df = handler.get_items_at_location(locid)
-        if not df.empty:
-            st.markdown(f"#### 📋 All items currently at shelf location `{locid}`:")
+        items_at_location = handler.get_items_at_location(latest["locid"])
+        if not items_at_location.empty:
+            st.markdown(f"<br/><b>All items at location <span style='color:#098A23'>{latest['locid']}</span>:</b>", unsafe_allow_html=True)
             st.dataframe(
-                df.rename(columns={"name": "Item Name", "barcode": "Barcode", "qty": "Shelf Qty"})
-                  [["Item Name", "Barcode", "Shelf Qty"]],
+                items_at_location.rename(columns={
+                    "itemid": "Item ID",
+                    "name": "Item Name",
+                    "barcode": "Barcode",
+                    "quantity": "Shelf Quantity"
+                }),
+                hide_index=True,
                 use_container_width=True
             )
         else:
-            st.info(f"No items found at location `{locid}`.")
+            st.info("No items currently in this shelf location.")
 
 def reset_camera_scan():
     for k in ["barcode_cam", "barcode_input", "declare_qty", "declare_locid"]:
@@ -373,4 +380,7 @@ with tab1:
         st.warning("Camera scanning not available. Please use tab 2 or `pip install streamlit-qrcode-scanner`.")
 
 with tab2:
-    barcode = st.text_input("Scan or enter barcode
+    barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
+    declare_logic(barcode, lambda: reset_camera_scan())
+
+show_latest_declaration_and_items()
