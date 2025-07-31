@@ -5,7 +5,6 @@ from db_handler import DatabaseManager
 from shelf_map.shelf_map_handler import ShelfMapHandler
 import plotly.graph_objects as go
 
-# --- Config ---
 LOCID_CSV_PATH = "assets/locid_list.csv"
 locid_df = pd.read_csv(LOCID_CSV_PATH)
 FILTERED_LOCIDS = set(str(l).strip() for l in locid_df["locid"].dropna().unique())
@@ -132,11 +131,9 @@ with tab1:
     if shelf_items.empty:
         st.info("No shelf items with expiry dates found.")
     else:
-        # Robust: always convert expirationdate to Timestamp, handle errors
         expiration_dates = pd.to_datetime(shelf_items["expirationdate"], errors="coerce")
         shelf_items["days_left"] = (expiration_dates - TODAY).dt.days
 
-        # Color coding and filtering
         def days_color(days):
             if pd.isna(days):
                 return None
@@ -153,7 +150,6 @@ with tab1:
         display_items = shelf_items[shelf_items["color"].notnull()].copy()
 
         st.markdown("#### 🟦 Map: Shelf with expiring items (red=most urgent, orange=soon, green=informational)")
-        # For map coloring: use max urgency per locid
         shelf_colormap = {}
         label_map = {}
         for locid, group in display_items.groupby("locid"):
@@ -165,11 +161,10 @@ with tab1:
                 shelf_colormap[locid] = "green"
             else:
                 shelf_colormap[locid] = "gray"
-            # Show most urgent item expiring soonest on label
             label_map[locid] = group.sort_values("days_left").iloc[0]["name"]
 
         shelf_locs = [row for row in map_handler.get_locations() if str(row["locid"]) in FILTERED_LOCIDS]
-        st.plotly_chart(map_with_expiry(shelf_locs, shelf_colormap, label_map), use_container_width=True)
+        st.plotly_chart(map_with_expiry(shelf_locs, shelf_colormap, label_map), use_container_width=True, key="days_map")
 
         st.markdown("#### Items near expiry (within alert window):")
         st.dataframe(
@@ -235,10 +230,15 @@ with tab2:
                 shelf_colormap[locid] = "green"
             else:
                 shelf_colormap[locid] = "gray"
-            label_map[locid] = group.sort_values("fraction_left").iloc[0]["name"]
+            # Defensive: avoid empty groups for label (should not happen)
+            label_group = group.sort_values("fraction_left")
+            if not label_group.empty:
+                label_map[locid] = label_group.iloc[0]["name"]
+            else:
+                label_map[locid] = locid
 
         shelf_locs = [row for row in map_handler.get_locations() if str(row["locid"]) in FILTERED_LOCIDS]
-        st.plotly_chart(map_with_expiry(shelf_locs, shelf_colormap, label_map), use_container_width=True)
+        st.plotly_chart(map_with_expiry(shelf_locs, shelf_colormap, label_map), use_container_width=True, key="fraction_map")
 
         st.markdown("#### Items with low shelf-life left:")
         st.dataframe(
