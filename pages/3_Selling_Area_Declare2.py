@@ -9,6 +9,12 @@ try:
 except ImportError:
     QR_AVAILABLE = False
 
+try:
+    from streamlit_plotly_events import plotly_events
+    PLOTLY_EVENTS_AVAILABLE = True
+except ImportError:
+    PLOTLY_EVENTS_AVAILABLE = False
+
 class DeclareHandler(DatabaseManager):
     def get_item_by_barcode(self, barcode):
         df = self.fetch_data("""
@@ -81,10 +87,14 @@ class DeclareHandler(DatabaseManager):
         """)
         return df["locid"].tolist() if not df.empty else []
 
-# --- MAP rendering function ---
-def map_with_highlights(locs, highlight_locs, label_offset=0.018):
+# --- MAP rendering function, returns a Plotly figure and a list of shelf polygons/labels
+def map_with_highlights_and_hover(locs, highlight_locs, label_offset=0.018):
     import math
     shapes = []
+    polygons = []
+    trace_x = []
+    trace_y = []
+    trace_text = []
     for row in locs:
         x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
@@ -93,13 +103,30 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
         is_hi = row["locid"] in highlight_locs
         fill = "rgba(220,53,69,0.34)" if is_hi else "rgba(180,180,180,0.11)"
         line = dict(width=2 if is_hi else 1.2, color="#d8000c" if is_hi else "#888")
+        # For clickability, we'll record the center
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
+            trace_x.append(cx)
+            trace_y.append(cy)
+            trace_text.append(row.get("label", row["locid"]))
+            polygons.append({
+                "locid": row["locid"],
+                "center": (cx, cy)
+            })
         else:
             rad = math.radians(deg)
             cos, sin = math.cos(rad), math.sin(rad)
             pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
-            path = "M " + " L ".join(f"{cx+u*cos-v*sin},{cy+u*sin+v*cos}" for u, v in pts) + " Z"
+            abs_pts = [(cx + u * cos - v * sin, cy + u * sin + v * cos) for u, v in pts]
+            # Plot invisible scatter for clickable center
+            trace_x.append(cx)
+            trace_y.append(cy)
+            trace_text.append(row.get("label", row["locid"]))
+            polygons.append({
+                "locid": row["locid"],
+                "center": (cx, cy)
+            })
+            path = "M " + " L ".join(f"{x_},{y_}" for x_, y_ in abs_pts) + " Z"
             shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
         if is_hi:
             r = max(w, h) * 0.5
@@ -111,6 +138,14 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
                       plot_bgcolor="#f8f9fa")
     fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
+    # Add invisible scatter points at each shelf center, so clicks will register there
+    fig.add_scatter(
+        x=trace_x, y=trace_y, text=trace_text,
+        mode="markers",
+        marker=dict(size=16, opacity=0.3, color="rgba(0,0,0,0.1)"),
+        hoverinfo="text",
+        name="Shelves"
+    )
     for row in locs:
         if row["locid"] in highlight_locs:
             x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
@@ -126,7 +161,7 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
                 borderpad=2,
                 opacity=0.97,
             )
-    return fig
+    return fig, polygons, trace_text
 
 st.set_page_config(layout="centered")
 st.title("🟢 Declare Selling Area Quantity (by Barcode)")
@@ -176,14 +211,24 @@ def declare_logic(barcode, reset_callback):
         inventory_total = handler.get_inventory_total(itemid)
         all_locids = handler.get_all_locids()
 
-        # Show shelf map for this item after any valid scan or entry
+        # Show shelf map for this item after any valid scan or entry, with interactivity
         shelf_locs = map_handler.get_locations()
         highlight_locs = shelf_entries["locid"].tolist() if not shelf_entries.empty else []
-        if highlight_locs:
-            st.markdown("#### 🗺️ Shelf Map — highlighted locations for this item:")
-            st.plotly_chart(map_with_highlights(shelf_locs, highlight_locs), use_container_width=True, key="shelf_map_for_item")
+        st.markdown("#### 🗺️ Shelf Map — click anywhere to see shelf name/ID")
+        fig, polygons, trace_text = map_with_highlights_and_hover(shelf_locs, highlight_locs)
+        clicked_locid = None
+
+        if PLOTLY_EVENTS_AVAILABLE:
+            events = plotly_events(fig, click_event=True, hover_event=False, select_event=False, key="main_shelf_map", override_height=350)
+            if events:
+                point = events[0]
+                idx = point["pointIndex"]
+                if 0 <= idx < len(polygons):
+                    clicked_locid = polygons[idx]["locid"]
+                    st.success(f"You clicked: **{clicked_locid}**")
         else:
-            st.info("No shelf locations found for this item.")
+            st.plotly_chart(fig, use_container_width=True)
+            st.info("Install `streamlit-plotly-events` for click support: `pip install streamlit-plotly-events`")
 
         prev_qty = 0
         prev_locid = ""
@@ -193,7 +238,6 @@ def declare_logic(barcode, reset_callback):
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
-        # Use selectbox for location input, with pre-selection if possible
         locid = st.selectbox(
             "Shelf Location (locid)",
             options=all_locids,
