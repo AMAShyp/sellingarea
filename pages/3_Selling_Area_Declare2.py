@@ -1,5 +1,6 @@
 import streamlit as st
 from db_handler import DatabaseManager
+# --- Add these imports:
 from shelf_map.shelf_map_handler import ShelfMapHandler
 import plotly.graph_objects as go
 
@@ -76,31 +77,26 @@ class DeclareHandler(DatabaseManager):
             """, (qty, int(itemid), locid))
 
     def get_all_locids(self):
-        # Get all from shelf_map_locations
         df = self.fetch_data("""
             SELECT locid FROM shelf_map_locations ORDER BY locid
         """)
         return df["locid"].tolist() if not df.empty else []
 
-def map_with_labels_and_highlight(locs, highlight_locs, label_offset=0.018):
+# ---- MAP UTILS from your previous logic ----
+def map_with_highlights(locs, highlight_locs, label_offset=0.018):
+    import math
     shapes = []
-    all_labels = []
-    highlight_set = set(highlight_locs)
     for row in locs:
-        try:
-            x, y, w, h = float(row["x_pct"]), float(row["y_pct"]), float(row["w_pct"]), float(row["h_pct"])
-        except Exception:
-            continue
+        x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
         cx, cy = x + w/2, 1 - (y + h/2)
         y_draw = 1 - y - h
-        is_hi = row["locid"] in highlight_set
-        fill = "rgba(220,53,69,0.34)" if is_hi else "rgba(180,180,180,0.09)"
+        is_hi = row["locid"] in highlight_locs
+        fill = "rgba(220,53,69,0.34)" if is_hi else "rgba(180,180,180,0.11)"
         line = dict(width=2 if is_hi else 1.2, color="#d8000c" if is_hi else "#888")
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
         else:
-            import math
             rad = math.radians(deg)
             cos, sin = math.cos(rad), math.sin(rad)
             pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
@@ -111,38 +107,35 @@ def map_with_labels_and_highlight(locs, highlight_locs, label_offset=0.018):
             shapes.append(dict(type="circle",xref="x",yref="y",
                                x0=cx-r,x1=cx+r,y0=cy-r,y1=cy+r,
                                line=dict(color="#d8000c",width=2,dash="dot")))
-        all_labels.append({
-            "locid": row["locid"],
-            "x": x + w/2,
-            "y": 1 - (y + h/2),
-            "highlight": is_hi,
-            "label": row.get("label", row["locid"])
-        })
     fig = go.Figure()
     fig.update_layout(shapes=shapes, height=340, margin=dict(l=12,r=12,t=10,b=5),
                       plot_bgcolor="#f8f9fa")
     fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
-    # Draw all labels (grey default, red highlight)
-    for label in all_labels:
-        fig.add_annotation(
-            x=label["x"],
-            y=label["y"] + (label_offset if label["highlight"] else 0),
-            text=label["label"],
-            showarrow=False,
-            font=dict(size=11, color="#c90000" if label["highlight"] else "#888", family="monospace"),
-            align="center",
-            bgcolor="rgba(255,255,255,0.99)" if label["highlight"] else "rgba(235,235,235,0.7)",
-            bordercolor="#d8000c" if label["highlight"] else "#bbb",
-            borderpad=2,
-            opacity=0.99 if label["highlight"] else 0.7,
-        )
+    for row in locs:
+        if row["locid"] in highlight_locs:
+            x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
+            fig.add_annotation(
+                x=x + w/2,
+                y=1 - (y + h/2) + label_offset,
+                text=row.get("label",row["locid"]),
+                showarrow=False,
+                font=dict(size=11, color="#c90000", family="monospace"),
+                align="center",
+                bgcolor="rgba(255,255,255,0.92)",
+                bordercolor="#d8000c",
+                borderpad=2,
+                opacity=0.97,
+            )
     return fig
 
+# ----------------------------------
+
 st.set_page_config(layout="centered")
-st.title("🟢 Declare Selling Area Quantity (Barcode, Map, & Location)")
+st.title("🟢 Declare Selling Area Quantity (by Barcode)")
 
 handler = DeclareHandler()
+# ---- Instantiate your map handler ----
 map_handler = ShelfMapHandler()
 
 st.markdown("""
@@ -166,16 +159,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Cache all shelf map locations at app startup
-@st.cache_data(show_spinner=False)
-def get_all_map_locs():
-    return map_handler.get_locations()
-
-all_map_locs = get_all_map_locs()
-
 tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 
-def declare_logic(barcode, reset_callback):
+def declare_logic(barcode, reset_callback, show_map=False):
     if not barcode:
         st.info("Please scan or enter the item barcode.")
         return
@@ -194,6 +180,17 @@ def declare_logic(barcode, reset_callback):
         inventory_total = handler.get_inventory_total(itemid)
         all_locids = handler.get_all_locids()
 
+        # -- Only for scanned barcode, show map with this item's locids highlighted --
+        if show_map:
+            shelf_locs = map_handler.get_locations()
+            # Highlight all shelf locations for this item:
+            highlight_locs = shelf_entries["locid"].tolist() if not shelf_entries.empty else []
+            if highlight_locs:
+                st.markdown("#### 🗺️ Shelf Map — highlighted locations for this item:")
+                st.plotly_chart(map_with_highlights(shelf_locs, highlight_locs), use_container_width=True, key="shelf_map_for_item")
+            else:
+                st.info("No shelf locations found for this item.")
+
         prev_qty = 0
         prev_locid = ""
         if shelf_entries.empty:
@@ -209,10 +206,6 @@ def declare_logic(barcode, reset_callback):
             max_chars=32,
             help="Start typing to see suggested locations."
         )
-        highlight = [locid] if locid and locid in [l['locid'] for l in all_map_locs] else []
-        st.markdown("#### 📍 Shelf Location Map")
-        st.plotly_chart(map_with_labels_and_highlight(all_map_locs, highlight), use_container_width=True, key="declare_map")
-
         loc_suggestions = [x for x in all_locids if locid.strip().lower() in x.lower()][:8] if locid else all_locids[:8]
         if locid and locid not in all_locids and loc_suggestions:
             st.caption("Closest matches: " + ", ".join(f"`{l}`" for l in loc_suggestions))
@@ -257,10 +250,12 @@ with tab1:
         barcode = qrcode_scanner(key="barcode_cam") or ""
         if barcode:
             st.success(f"Scanned: {barcode}")
-        declare_logic(barcode, reset_camera_scan)
+        # -- Only show map if scanned --
+        declare_logic(barcode, reset_camera_scan, show_map=bool(barcode))
     else:
         st.warning("Camera scanning not available. Please use tab 2 or `pip install streamlit-qrcode-scanner`.")
 
 with tab2:
     barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
-    declare_logic(barcode, lambda: reset_camera_scan())
+    # Don't show map for manual input (can change this if desired)
+    declare_logic(barcode, lambda: reset_camera_scan(), show_map=False)
