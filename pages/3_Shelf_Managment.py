@@ -40,7 +40,6 @@ class ShelfManagementHandler(DatabaseManager):
                 """, (int(itemid), locid))
 
     def return_to_inventory(self, itemid, qty):
-        # FIFO: Try to update, else insert.
         if qty > 0:
             check = self.fetch_data(
                 "SELECT quantity FROM inventory WHERE itemid=%s AND expirationdate=CURRENT_DATE AND cost_per_unit=0 AND storagelocation='BulkReturn'",
@@ -142,18 +141,33 @@ with tab2:
     if items_in_loc_bulk.empty:
         st.info(f"No items currently on shelf `{selected_locid_bulk}`.")
     else:
-        st.markdown(f"#### Set quantities below. Any item set to <b>0</b> will be dropped from shelf and moved to inventory.", unsafe_allow_html=True)
+        # Generalized input for all
+        st.markdown("<b>Set a general quantity for ALL items below (overrides individual boxes):</b>", unsafe_allow_html=True)
+        general_qty = st.number_input(
+            "General quantity for all",
+            min_value=0,
+            max_value=99999,
+            value=None,
+            step=1,
+            key=f"bulk_generalqty_{selected_locid_bulk}"
+        )
+
+        st.markdown("#### Adjust if needed, then click <b>Apply Bulk Update</b>", unsafe_allow_html=True)
         bulk_changes = {}
         for idx, row in items_in_loc_bulk.iterrows():
             itemid = row["itemid"]
             name = row["name"]
             barcode = row["barcode"]
             shelf_qty = int(row["quantity"])
+
+            # If general_qty is not None, override default value
+            init_value = general_qty if general_qty is not None else shelf_qty
+
             new_qty = st.number_input(
                 f"{name} ({barcode})",
                 min_value=0,
                 max_value=99999,
-                value=shelf_qty,
+                value=init_value,
                 step=1,
                 key=f"bulkqty_{selected_locid_bulk}_{itemid}"
             )
@@ -188,6 +202,7 @@ with tab2:
 
     st.markdown(
         "<div style='margin-top:2em;color:#bbb;font-size:1em'>"
+        "Set general quantity for all, or adjust individuals below.<br>"
         "Set quantity to <b>0</b> to drop out an item from the shelf and return it to inventory.<br>"
         "Click <b>Apply Bulk Update</b> to apply all changes at once."
         "</div>", unsafe_allow_html=True
