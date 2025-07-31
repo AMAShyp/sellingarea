@@ -90,7 +90,6 @@ class DeclareHandler(DatabaseManager):
     def get_all_locids(self):
         return sorted(FILTERED_LOCIDS)
 
-# --- MAP rendering function: scatter text labels ---
 def map_with_highlights_and_textlabels(locs, highlight_locs, allowed_locids):
     import math
     shapes = []
@@ -135,7 +134,6 @@ def map_with_highlights_and_textlabels(locs, highlight_locs, allowed_locids):
             path = "M " + " L ".join(f"{x_},{y_}" for x_, y_ in abs_pts) + " Z"
             shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
 
-        # Add marker and label for text clickability
         trace_x.append(cx)
         trace_y.append(cy)
         trace_text.append(row.get("label", row["locid"]))
@@ -158,7 +156,6 @@ def map_with_highlights_and_textlabels(locs, highlight_locs, allowed_locids):
     fig = go.Figure()
     fig.update_layout(shapes=shapes, height=460, margin=dict(l=12,r=12,t=10,b=5),
                       plot_bgcolor="#f8f9fa")
-    # Zoom to filtered shelves
     if any_loc:
         expand_x = (max_x - min_x) * 0.07
         expand_y = (max_y - min_y) * 0.07
@@ -167,7 +164,6 @@ def map_with_highlights_and_textlabels(locs, highlight_locs, allowed_locids):
     else:
         fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
         fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
-    # Add invisible scatter for clickability
     fig.add_scatter(
         x=trace_x, y=trace_y, text=trace_text,
         mode="markers",
@@ -175,7 +171,6 @@ def map_with_highlights_and_textlabels(locs, highlight_locs, allowed_locids):
         hoverinfo="text",
         name="Shelves"
     )
-    # Add scatter text labels for each allowed cell
     fig.add_scatter(
         x=label_x, y=label_y, text=label_text,
         mode="text",
@@ -214,18 +209,31 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# This state block will survive reruns and persist the "latest" declaration
 if "latest_declaration" not in st.session_state:
-    st.session_state["latest_declaration"] = None
+    st.session_state["latest_declaration"] = {}
+if "latest_itemid" not in st.session_state:
+    st.session_state["latest_itemid"] = None
 
 tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 
 def declare_logic(barcode, reset_callback):
+    item = None
+    itemid = None
+
+    if barcode:
+        item = handler.get_item_by_barcode(barcode)
+        if item is not None:
+            itemid = int(item['itemid'])
+
+    # If new item scanned/entered, clear previous declaration message
+    if itemid is not None and st.session_state.get("latest_itemid") != itemid:
+        st.session_state["latest_declaration"] = {}
+        st.session_state["latest_itemid"] = itemid
+
     if not barcode:
         st.info("Please scan or enter the item barcode.")
         return
 
-    item = handler.get_item_by_barcode(barcode)
     if item is not None:
         st.markdown(f"**Item:** {item['name']}<br>🔖 Barcode: `{item['barcode']}`", unsafe_allow_html=True)
         st.markdown(
@@ -234,7 +242,6 @@ def declare_logic(barcode, reset_callback):
             f"<div class='catline'><span class='cat-sect'>Section:</span> <span class='cat-val'>{item['sectioncat']}</span></div>"
             f"<div class='catline'><span class='cat-family'>Family:</span> <span class='cat-val'>{item['familycat']}</span></div>",
             unsafe_allow_html=True)
-        itemid = int(item['itemid'])
         shelf_entries = handler.get_shelf_entries(itemid)
         inventory_total = handler.get_inventory_total(itemid)
         all_locids = handler.get_all_locids()
@@ -299,19 +306,22 @@ def declare_logic(barcode, reset_callback):
                 st.info("Declared quantity is less than previous; only updating shelf record, not adding back to inventory.")
             handler.set_shelf_quantity(itemid, locid, new_qty)
             st.success(f"Selling area quantity for '{item['name']}' at {locid} is now {new_qty}.")
-            # Save latest declaration in session state
+            # Save latest declaration in session state for current item
             st.session_state["latest_declaration"] = {
+                "itemid": itemid,
                 "itemname": item['name'],
                 "barcode": item['barcode'],
                 "locid": locid,
                 "qty": new_qty
             }
-            st.rerun()  # So latest is always at the bottom and visible
+            # No rerun, so message stays until a new item/barcode
 
-# Show latest declaration summary always at the bottom
+    elif barcode.strip():
+        st.error("❌ Barcode not found in the item table.")
+
 def show_latest_declaration():
     latest = st.session_state.get("latest_declaration")
-    if latest:
+    if latest and "itemid" in latest:
         st.markdown(
             f"""<div style='background:#e7f8e9;border:1.5px solid #47bd72;
                   border-radius:0.5em;padding:0.65em 1em 0.6em 1em;
