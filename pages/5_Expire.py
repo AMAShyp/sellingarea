@@ -5,7 +5,6 @@ from selling_area.shelf_handler import ShelfHandler
 from shelf_map.shelf_map_handler import ShelfMapHandler
 import plotly.graph_objects as go
 
-# ---- Your MAP LOGIC (reuse for both subtabs) ----
 def map_with_highlights(locs, highlight_locs, color="#d8000c", alpha=0.32):
     import math
     shapes = []
@@ -63,6 +62,10 @@ try:
         st.info("No items in the selling area.")
         st.stop()
 
+    if "locid" not in shelf_df.columns:
+        st.error("Error: The shelf items data does not include a 'locid' column. Please fix your get_shelf_items() SQL to return locid for map display.")
+        st.stop()
+
     # --- Map handler and locations ---
     map_handler = ShelfMapHandler()
     shelf_locs = map_handler.get_locations()
@@ -105,7 +108,6 @@ try:
                 f"✅ No items expiring within {green_days} days."
             )
         else:
-            # --- MAP: highlight all locids with expiring items (any row in df) ---
             hi_locs = sorted(set(near_expiry_df["locid"].dropna().unique()))
             st.markdown("#### 🗺️ Shelf Map: Red = shelves with near-expiry items")
             st.plotly_chart(map_with_highlights(shelf_locs, hi_locs), use_container_width=True)
@@ -187,7 +189,6 @@ try:
                     "✅ No items are below the selected fraction of shelf life."
                 )
             else:
-                # --- MAP: highlight all locids with expiring items (any row in df) ---
                 hi_locs = sorted(set(alerts_frac_df["locid"].dropna().unique()))
                 st.markdown("#### 🗺️ Shelf Map: Red = shelves with near-expiry items (by shelf life %)")
                 st.plotly_chart(map_with_highlights(shelf_locs, hi_locs), use_container_width=True)
