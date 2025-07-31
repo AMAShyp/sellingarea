@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 from db_handler import DatabaseManager
-from shelf_map.shelf_map_handler import ShelfMapHandler
 
 # --- LOAD filtered locid list from CSV ---
 LOCID_CSV_PATH = "assets/locid_list.csv"
@@ -10,7 +9,6 @@ FILTERED_LOCIDS = set(str(l).strip() for l in locid_df["locid"].dropna().unique(
 
 class ShelfManagementHandler(DatabaseManager):
     def get_all_shelf_items(self, locids):
-        # Return all shelf entries and items at these locations
         q = """
             SELECT s.locid, i.itemid, i.itemnameenglish AS name, i.barcode, s.quantity
             FROM shelf s
@@ -46,7 +44,7 @@ class ShelfManagementHandler(DatabaseManager):
         return sorted(FILTERED_LOCIDS)
 
 st.set_page_config(layout="wide")
-st.title("🗄️ Shelf Items Management")
+st.title("🗄️ Shelf Items Management (Direct Declaration)")
 
 handler = ShelfManagementHandler()
 
@@ -75,37 +73,33 @@ else:
         barcode = row["barcode"]
         shelf_qty = int(row["quantity"])
 
-        col1, col2, col3, col4, col5 = st.columns([2, 2, 1.2, 1.1, 1.4])
+        col1, col2, col3, col4 = st.columns([2, 2, 1.5, 1.2])
 
         with col1:
             st.markdown(f"**{name}**<br><span style='color:#bbb;font-size:0.92em'>Barcode:</span> <span style='font-family:monospace;font-size:1em'>{barcode}</span>", unsafe_allow_html=True)
         with col2:
             st.markdown(f"<b>Current Shelf Qty:</b> {shelf_qty}", unsafe_allow_html=True)
         with col3:
-            qty_change = st.number_input(
-                "Qty", min_value=1, max_value=99999, value=1,
-                step=1, key=f"qty_{selected_locid}_{itemid}"
+            new_qty = st.number_input(
+                "Set shelf quantity",
+                min_value=0,
+                max_value=99999,
+                value=shelf_qty,
+                step=1,
+                key=f"declare_{selected_locid}_{itemid}"
             )
         with col4:
-            if st.button("➕ Add", key=f"add_{selected_locid}_{itemid}"):
-                new_qty = shelf_qty + int(qty_change)
-                handler.update_shelf_quantity(itemid, selected_locid, new_qty)
-                st.success(f"Added {qty_change} units to '{name}'. New shelf qty: {new_qty}")
-                st.experimental_rerun()
-        with col5:
-            if st.button("➖ Decline", key=f"decl_{selected_locid}_{itemid}"):
-                if shelf_qty - int(qty_change) <= 0:
-                    handler.update_shelf_quantity(itemid, selected_locid, 0)
-                    st.success(f"Item '{name}' removed from shelf.")
+            if st.button("✅ Update", key=f"update_{selected_locid}_{itemid}"):
+                handler.update_shelf_quantity(itemid, selected_locid, int(new_qty))
+                if int(new_qty) == 0:
+                    st.success(f"'{name}' removed from shelf.")
                 else:
-                    new_qty = shelf_qty - int(qty_change)
-                    handler.update_shelf_quantity(itemid, selected_locid, new_qty)
-                    st.success(f"Removed {qty_change} units from '{name}'. New shelf qty: {new_qty}")
+                    st.success(f"'{name}' shelf quantity set to {new_qty}.")
                 st.experimental_rerun()
 
     st.markdown(
         "<div style='margin-top:2em;color:#bbb;font-size:1em'>"
-        "Tip: If quantity becomes zero, the item is removed from the shelf.<br>"
-        "Use the ➕/➖ buttons for quick management."
+        "Set the quantity to <b>0</b> to remove the item from the shelf.<br>"
+        "Click ✅ Update to apply changes for each item."
         "</div>", unsafe_allow_html=True
     )
