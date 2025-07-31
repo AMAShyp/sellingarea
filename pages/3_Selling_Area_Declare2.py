@@ -72,7 +72,7 @@ class DeclareHandler(DatabaseManager):
     def get_all_locids_and_labels(self):
         df = self.fetch_data("""
             SELECT locid, label, x_pct, y_pct, w_pct, h_pct, COALESCE(rotation_deg,0) as rotation_deg
-            FROM shelf_map_location_2 ORDER BY locid
+            FROM shelf_map_locations_2 ORDER BY locid
         """)
         return df
 
