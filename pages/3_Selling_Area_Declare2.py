@@ -8,7 +8,6 @@ try:
 except ImportError:
     QR_AVAILABLE = False
 
-# ------------- DeclareHandler -------------
 class DeclareHandler(DatabaseManager):
     def get_item_by_barcode(self, barcode):
         df = self.fetch_data("""
@@ -69,14 +68,13 @@ class DeclareHandler(DatabaseManager):
                 UPDATE shelf SET quantity=%s WHERE itemid=%s AND locid=%s
             """, (qty, int(itemid), locid))
 
-    def get_all_locids_and_labels(self):
+    def get_all_locs(self):
         df = self.fetch_data("""
             SELECT locid, label, x_pct, y_pct, w_pct, h_pct, COALESCE(rotation_deg,0) as rotation_deg
-            FROM shelf_map_locations_2 ORDER BY locid
+            FROM shelf_map_location_2 ORDER BY locid
         """)
         return df
 
-# ------------- MAP WITH LABELS AND HIGHLIGHT -------------
 def map_with_labels_and_highlight(locs_df, highlight_locs, label_offset=0.018):
     import math
     shapes = []
@@ -130,12 +128,12 @@ def map_with_labels_and_highlight(locs_df, highlight_locs, label_offset=0.018):
         )
     return fig
 
-# ------------- MAIN STREAMLIT APP -------------
 st.set_page_config(layout="centered")
 st.title("🟢 Declare Selling Area Quantity (by Barcode, Map & Location)")
 
 handler = DeclareHandler()
-locs_df = handler.get_all_locids_and_labels()
+locs_df = handler.get_all_locs()
+all_locids = locs_df["locid"].tolist()
 
 st.markdown("""
 <style>
@@ -177,8 +175,6 @@ def declare_logic(barcode, reset_callback):
         itemid = int(item['itemid'])
         shelf_entries = handler.get_shelf_entries(itemid)
         inventory_total = handler.get_inventory_total(itemid)
-        all_locids = locs_df["locid"].tolist()
-
         prev_qty = 0
         prev_locid = ""
         if shelf_entries.empty:
@@ -187,6 +183,7 @@ def declare_logic(barcode, reset_callback):
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
+        # Only allow valid locids (from shelf_map_location_2)
         locid = st.selectbox(
             "Shelf Location (locid)",
             options=all_locids,
