@@ -330,6 +330,7 @@ def declare_logic(barcode, reset_callback):
                 "locid": locid,
                 "qty": new_qty
             }
+            st.rerun()  # ONE-TOUCH: rerun instantly after declaring!
 
     elif barcode.strip():
         st.error("❌ Barcode not found in the item table.")
@@ -352,7 +353,6 @@ def show_latest_declaration_and_items():
         )
         handler = DeclareHandler()
         items_at_location = handler.get_items_at_location(latest["locid"])
-        # --- Hide any with zero quantity (should never occur, but extra safe) ---
         items_at_location = items_at_location[items_at_location["quantity"] > 0]
         if not items_at_location.empty:
             st.markdown(f"<br/><b>All items at location <span style='color:#098A23'>{latest['locid']}</span>:</b>", unsafe_allow_html=True)
