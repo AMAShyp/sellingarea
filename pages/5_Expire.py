@@ -10,11 +10,10 @@ LOCID_CSV_PATH = "assets/locid_list.csv"
 locid_df = pd.read_csv(LOCID_CSV_PATH)
 FILTERED_LOCIDS = set(str(l).strip() for l in locid_df["locid"].dropna().unique())
 
-TODAY = datetime.date.today()
+TODAY = pd.Timestamp(datetime.date.today())
 
 class ExpiryHandler(DatabaseManager):
     def get_expiry_shelf_items(self, locids):
-        # Join shelf to item for shelflife, expirationdate, etc.
         q = """
             SELECT s.locid, s.itemid, i.itemnameenglish AS name, i.barcode,
                    s.quantity, s.expirationdate, i.shelflife
@@ -40,11 +39,9 @@ map_handler = ShelfMapHandler()
 st.markdown("## Near-Expiry and Expired Items (shelf batches)")
 tab1, tab2 = st.tabs(["Days-Based Expiry", "Shelf-Life Fraction"])
 
-# --- MAP RENDERING (with colored shelves) ---
 def map_with_expiry(locs, shelf_colormap, label_map):
     import math
     shapes = []
-    polygons = []
     label_x = []
     label_y = []
     label_text = []
@@ -135,10 +132,14 @@ with tab1:
     if shelf_items.empty:
         st.info("No shelf items with expiry dates found.")
     else:
-        shelf_items["days_left"] = (pd.to_datetime(shelf_items["expirationdate"]).dt.date - TODAY).dt.days
+        # Robust: always convert expirationdate to Timestamp, handle errors
+        expiration_dates = pd.to_datetime(shelf_items["expirationdate"], errors="coerce")
+        shelf_items["days_left"] = (expiration_dates - TODAY).dt.days
 
         # Color coding and filtering
         def days_color(days):
+            if pd.isna(days):
+                return None
             if days <= red_days:
                 return "red"
             elif days <= orange_days:
@@ -189,7 +190,6 @@ with tab1:
 # --- Tab 2: Shelf-Life Fraction Expiry ---
 with tab2:
     st.subheader("⚡ Shelf-Life Fraction (shelf-life used up)")
-
     col1, col2, col3 = st.columns(3)
     with col1:
         red_frac = st.number_input("Red (urgent, ≤ fraction left)", min_value=0.00, max_value=1.00, value=0.20, step=0.01, format="%.2f")
@@ -202,14 +202,12 @@ with tab2:
     if shelf_items.empty:
         st.info("No shelf items with expiry dates found.")
     else:
-        # Calculate fraction left
-        shelf_items["days_left"] = (pd.to_datetime(shelf_items["expirationdate"]).dt.date - TODAY).dt.days
-        # shelflife can be None or zero (invalid)
+        expiration_dates = pd.to_datetime(shelf_items["expirationdate"], errors="coerce")
+        shelf_items["days_left"] = (expiration_dates - TODAY).dt.days
         shelf_items["shelflife"] = pd.to_numeric(shelf_items["shelflife"], errors="coerce")
         shelf_items["fraction_left"] = shelf_items["days_left"] / shelf_items["shelflife"]
         shelf_items["fraction_left"] = shelf_items["fraction_left"].where(shelf_items["shelflife"] > 0, None)
 
-        # Color coding and filtering
         def frac_color(frac):
             if frac is None or pd.isna(frac):
                 return None
@@ -226,7 +224,6 @@ with tab2:
         display_items = shelf_items[shelf_items["color"].notnull()].copy()
 
         st.markdown("#### 🟦 Map: Shelf with used-up shelf life (red=most urgent, orange=soon, green=informational)")
-        # For map coloring: use max urgency per locid
         shelf_colormap = {}
         label_map = {}
         for locid, group in display_items.groupby("locid"):
@@ -261,7 +258,6 @@ with tab2:
             hide_index=True
         )
 
-        # Items missing shelf-life value
         missing_shelf_life = shelf_items[shelf_items["shelflife"].isna() | (shelf_items["shelflife"] <= 0)]
         if not missing_shelf_life.empty:
             st.markdown("#### ⚠️ Items missing shelf-life definition (not color-coded):")
