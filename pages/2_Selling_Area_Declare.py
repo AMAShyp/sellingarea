@@ -89,10 +89,9 @@ class DeclareHandler(DatabaseManager):
             """, (qty, int(itemid), locid))
 
     def get_all_locids(self):
-        # Only return filtered locids, sorted
         return sorted(FILTERED_LOCIDS)
 
-# --- MAP rendering function, only for filtered locids ---
+# --- MAP rendering function, fits to filtered locations ---
 def map_with_highlights_and_hover(locs, highlight_locs, allowed_locids, label_offset=0.018):
     import math
     shapes = []
@@ -100,6 +99,10 @@ def map_with_highlights_and_hover(locs, highlight_locs, allowed_locids, label_of
     trace_x = []
     trace_y = []
     trace_text = []
+    min_x = min_y = float("inf")
+    max_x = max_y = float("-inf")
+    any_loc = False
+
     for row in locs:
         if str(row["locid"]) not in allowed_locids:
             continue
@@ -107,6 +110,11 @@ def map_with_highlights_and_hover(locs, highlight_locs, allowed_locids, label_of
         deg = float(row.get("rotation_deg") or 0)
         cx, cy = x + w/2, 1 - (y + h/2)
         y_draw = 1 - y - h
+        min_x = min(min_x, x)
+        min_y = min(min_y, y_draw)
+        max_x = max(max_x, x + w)
+        max_y = max(max_y, y_draw + h)
+        any_loc = True
         is_hi = row["locid"] in highlight_locs
         fill = "rgba(220,53,69,0.34)" if is_hi else "rgba(180,180,180,0.11)"
         line = dict(width=2 if is_hi else 1.2, color="#d8000c" if is_hi else "#888")
@@ -124,6 +132,10 @@ def map_with_highlights_and_hover(locs, highlight_locs, allowed_locids, label_of
             cos, sin = math.cos(rad), math.sin(rad)
             pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
             abs_pts = [(cx + u * cos - v * sin, cy + u * sin + v * cos) for u, v in pts]
+            min_x = min([min_x] + [p[0] for p in abs_pts])
+            min_y = min([min_y] + [p[1] for p in abs_pts])
+            max_x = max([max_x] + [p[0] for p in abs_pts])
+            max_y = max([max_y] + [p[1] for p in abs_pts])
             trace_x.append(cx)
             trace_y.append(cy)
             trace_text.append(row.get("label", row["locid"]))
@@ -139,10 +151,17 @@ def map_with_highlights_and_hover(locs, highlight_locs, allowed_locids, label_of
                                x0=cx-r,x1=cx+r,y0=cy-r,y1=cy+r,
                                line=dict(color="#d8000c",width=2,dash="dot")))
     fig = go.Figure()
-    fig.update_layout(shapes=shapes, height=340, margin=dict(l=12,r=12,t=10,b=5),
+    fig.update_layout(shapes=shapes, height=460, margin=dict(l=12,r=12,t=10,b=5),
                       plot_bgcolor="#f8f9fa")
-    fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
-    fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
+    # Dynamically set the axes to zoom to the filtered shelves
+    if any_loc:
+        expand_x = (max_x - min_x) * 0.07  # Small border
+        expand_y = (max_y - min_y) * 0.07
+        fig.update_xaxes(visible=False, range=[min_x - expand_x, max_x + expand_x], constrain="domain", fixedrange=True)
+        fig.update_yaxes(visible=False, range=[min_y - expand_y, max_y + expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
+    else:
+        fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
+        fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
     fig.add_scatter(
         x=trace_x, y=trace_y, text=trace_text,
         mode="markers",
@@ -217,7 +236,6 @@ def declare_logic(barcode, reset_callback):
         inventory_total = handler.get_inventory_total(itemid)
         all_locids = handler.get_all_locids()
 
-        # Only show filtered locids on the map
         shelf_locs = [row for row in map_handler.get_locations() if str(row["locid"]) in FILTERED_LOCIDS]
         highlight_locs = shelf_entries["locid"].tolist() if not shelf_entries.empty else []
 
@@ -226,7 +244,7 @@ def declare_logic(barcode, reset_callback):
         clicked_locid = None
 
         if PLOTLY_EVENTS_AVAILABLE:
-            events = plotly_events(fig, click_event=True, hover_event=False, select_event=False, key="main_shelf_map", override_height=350)
+            events = plotly_events(fig, click_event=True, hover_event=False, select_event=False, key="main_shelf_map", override_height=510)
             if events:
                 point = events[0]
                 idx = point["pointIndex"]
@@ -245,7 +263,6 @@ def declare_logic(barcode, reset_callback):
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
-        # Searchable selectbox for filtered locids only
         locid = st.selectbox(
             "Shelf Location (locid)",
             options=all_locids,
