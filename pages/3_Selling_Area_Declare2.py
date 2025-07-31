@@ -77,7 +77,7 @@ class DeclareHandler(DatabaseManager):
 
     def get_all_locids(self):
         df = self.fetch_data("""
-            SELECT locid FROM shelf_map_locations ORDER BY locid
+            SELECT locid FROM shelf_map_locations_2 ORDER BY locid
         """)
         return df["locid"].tolist() if not df.empty else []
 
