@@ -193,18 +193,19 @@ def declare_logic(barcode, reset_callback):
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
-        locid = st.text_input(
-            "Shelf Location (locid)",
-            value=prev_locid,
-            key="declare_locid",
-            max_chars=32,
-            help="Start typing to see suggested locations."
-        )
-        loc_suggestions = [x for x in all_locids if locid.strip().lower() in x.lower()][:8] if locid else all_locids[:8]
-        if locid and locid not in all_locids and loc_suggestions:
-            st.caption("Closest matches: " + ", ".join(f"`{l}`" for l in loc_suggestions))
-        elif not locid and all_locids:
-            st.caption("Sample locations: " + ", ".join(f"`{l}`" for l in all_locids[:8]))
+        # --- Smart dropdown: search and select location ---
+        def smart_locid_dropdown(all_locids, prev_locid):
+            # If prev_locid is present, use it as default
+            # Allow user to search in dropdown with case-insensitive contains logic
+            search = st.text_input("Search or pick shelf location (locid)", value=prev_locid, key="locid_search", max_chars=32, help="Start typing to search or pick location.")
+            filtered = [l for l in all_locids if search.strip().lower() in l.lower()] if search else all_locids
+            # To handle empty filter, fall back to all locations
+            filtered = filtered or all_locids
+            # Preselect prev_locid if valid, else first match
+            default_idx = filtered.index(prev_locid) if prev_locid in filtered else 0
+            return st.selectbox("Shelf Location (locid)", options=filtered, index=default_idx, key="declare_locid", help="Pick the correct location for this item.")
+
+        locid = smart_locid_dropdown(all_locids, prev_locid)
 
         st.info(f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
                 f"**Available in inventory:** {inventory_total}")
@@ -233,7 +234,7 @@ def declare_logic(barcode, reset_callback):
         st.error("❌ Barcode not found in the item table.")
 
 def reset_camera_scan():
-    for k in ["barcode_cam", "barcode_input", "declare_qty", "declare_locid"]:
+    for k in ["barcode_cam", "barcode_input", "declare_qty", "declare_locid", "locid_search"]:
         if k in st.session_state:
             st.session_state.pop(k)
 
