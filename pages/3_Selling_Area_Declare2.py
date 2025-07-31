@@ -54,6 +54,13 @@ class DeclareHandler(DatabaseManager):
         return qty - left
 
     def set_shelf_quantity(self, itemid, locid, qty):
+        # ONLY allow locids that are present in shelf_map_locations_2!
+        valid = self.fetch_data(
+            "SELECT locid FROM shelf_map_locations_2 WHERE locid=%s",
+            (locid,)
+        )
+        if valid.empty:
+            raise ValueError(f"locid {locid} is not present in shelf_map_locations_2")
         exists = self.fetch_data(
             "SELECT quantity FROM shelf WHERE itemid=%s AND locid=%s",
             (int(itemid), locid)
@@ -183,7 +190,7 @@ def declare_logic(barcode, reset_callback):
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
-        # Only allow valid locids (from shelf_map_locations_2)
+        # Only allow locids from shelf_map_locations_2
         locid = st.selectbox(
             "Shelf Location (locid)",
             options=all_locids,
