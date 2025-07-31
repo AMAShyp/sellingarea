@@ -38,17 +38,24 @@ class ShelfManagementHandler(DatabaseManager):
                 self.execute_command("""
                     DELETE FROM shelf WHERE itemid=%s AND locid=%s
                 """, (int(itemid), locid))
-        # If new_qty <= 0 and row doesn't exist, do nothing
 
     def return_to_inventory(self, itemid, qty):
-        # Move qty back to inventory, using a simple FIFO logic or just add as new
+        # FIFO: Try to update, else insert.
         if qty > 0:
-            self.execute_command("""
-                INSERT INTO inventory (itemid, expirationdate, quantity, cost_per_unit, storagelocation)
-                VALUES (%s, CURRENT_DATE, %s, 0, 'BulkReturn')
-                ON CONFLICT (itemid, expirationdate, cost_per_unit, storagelocation)
-                DO UPDATE SET quantity = inventory.quantity + EXCLUDED.quantity
-            """, (int(itemid), qty))
+            check = self.fetch_data(
+                "SELECT quantity FROM inventory WHERE itemid=%s AND expirationdate=CURRENT_DATE AND cost_per_unit=0 AND storagelocation='BulkReturn'",
+                (int(itemid),)
+            )
+            if not check.empty:
+                self.execute_command(
+                    "UPDATE inventory SET quantity=quantity+%s WHERE itemid=%s AND expirationdate=CURRENT_DATE AND cost_per_unit=0 AND storagelocation='BulkReturn'",
+                    (qty, int(itemid))
+                )
+            else:
+                self.execute_command(
+                    "INSERT INTO inventory (itemid, expirationdate, quantity, cost_per_unit, storagelocation) VALUES (%s, CURRENT_DATE, %s, 0, 'BulkReturn')",
+                    (int(itemid), qty)
+                )
 
     def get_all_locids(self):
         return sorted(FILTERED_LOCIDS)
@@ -109,15 +116,16 @@ with tab1:
             with col4:
                 if st.button("✅ Update", key=f"update_{selected_locid}_{itemid}"):
                     handler.update_shelf_quantity(itemid, selected_locid, int(new_qty))
-                    if int(new_qty) == 0:
-                        st.success(f"'{name}' removed from shelf.")
-                    else:
+                    if int(new_qty) == 0 and shelf_qty > 0:
+                        handler.return_to_inventory(itemid, shelf_qty)
+                        st.success(f"'{name}' removed from shelf and {shelf_qty} returned to inventory.")
+                    elif int(new_qty) != shelf_qty:
                         st.success(f"'{name}' shelf quantity set to {new_qty}.")
                     st.rerun()
 
         st.markdown(
             "<div style='margin-top:2em;color:#bbb;font-size:1em'>"
-            "Set the quantity to <b>0</b> to remove the item from the shelf.<br>"
+            "Set the quantity to <b>0</b> to remove the item from the shelf and return it to inventory.<br>"
             "Click ✅ Update to apply changes for each item."
             "</div>", unsafe_allow_html=True
         )
@@ -136,7 +144,6 @@ with tab2:
     else:
         st.markdown(f"#### Set quantities below. Any item set to <b>0</b> will be dropped from shelf and moved to inventory.", unsafe_allow_html=True)
         bulk_changes = {}
-        table_data = []
         for idx, row in items_in_loc_bulk.iterrows():
             itemid = row["itemid"]
             name = row["name"]
