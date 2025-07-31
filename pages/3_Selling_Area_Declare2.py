@@ -76,19 +76,21 @@ class DeclareHandler(DatabaseManager):
             """, (qty, int(itemid), locid))
 
     def get_all_locids(self):
-        # Get from shelf_map_locations
+        # Get all from shelf_map_locations
         df = self.fetch_data("""
             SELECT locid FROM shelf_map_locations ORDER BY locid
         """)
         return df["locid"].tolist() if not df.empty else []
 
 def map_with_labels_and_highlight(locs, highlight_locs, label_offset=0.018):
-    import math
     shapes = []
     all_labels = []
     highlight_set = set(highlight_locs)
     for row in locs:
-        x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
+        try:
+            x, y, w, h = float(row["x_pct"]), float(row["y_pct"]), float(row["w_pct"]), float(row["h_pct"])
+        except Exception:
+            continue
         deg = float(row.get("rotation_deg") or 0)
         cx, cy = x + w/2, 1 - (y + h/2)
         y_draw = 1 - y - h
@@ -98,6 +100,7 @@ def map_with_labels_and_highlight(locs, highlight_locs, label_offset=0.018):
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
         else:
+            import math
             rad = math.radians(deg)
             cos, sin = math.cos(rad), math.sin(rad)
             pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
@@ -120,13 +123,14 @@ def map_with_labels_and_highlight(locs, highlight_locs, label_offset=0.018):
                       plot_bgcolor="#f8f9fa")
     fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
+    # Draw all labels (grey default, red highlight)
     for label in all_labels:
         fig.add_annotation(
             x=label["x"],
             y=label["y"] + (label_offset if label["highlight"] else 0),
             text=label["label"],
             showarrow=False,
-            font=dict(size=11, color="#c90000" if label["highlight"] else "#888", family="monospace",),
+            font=dict(size=11, color="#c90000" if label["highlight"] else "#888", family="monospace"),
             align="center",
             bgcolor="rgba(255,255,255,0.99)" if label["highlight"] else "rgba(235,235,235,0.7)",
             bordercolor="#d8000c" if label["highlight"] else "#bbb",
@@ -162,6 +166,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Cache all shelf map locations at app startup
+@st.cache_data(show_spinner=False)
+def get_all_map_locs():
+    return map_handler.get_locations()
+
+all_map_locs = get_all_map_locs()
+
 tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 
 def declare_logic(barcode, reset_callback):
@@ -182,7 +193,6 @@ def declare_logic(barcode, reset_callback):
         shelf_entries = handler.get_shelf_entries(itemid)
         inventory_total = handler.get_inventory_total(itemid)
         all_locids = handler.get_all_locids()
-        shelfmap_locs = map_handler.get_locations()
 
         prev_qty = 0
         prev_locid = ""
@@ -199,9 +209,9 @@ def declare_logic(barcode, reset_callback):
             max_chars=32,
             help="Start typing to see suggested locations."
         )
-        highlight = [locid] if locid and locid in [l['locid'] for l in shelfmap_locs] else []
+        highlight = [locid] if locid and locid in [l['locid'] for l in all_map_locs] else []
         st.markdown("#### 📍 Shelf Location Map")
-        st.plotly_chart(map_with_labels_and_highlight(shelfmap_locs, highlight), use_container_width=True, key="declare_map")
+        st.plotly_chart(map_with_labels_and_highlight(all_map_locs, highlight), use_container_width=True, key="declare_map")
 
         loc_suggestions = [x for x in all_locids if locid.strip().lower() in x.lower()][:8] if locid else all_locids[:8]
         if locid and locid not in all_locids and loc_suggestions:
