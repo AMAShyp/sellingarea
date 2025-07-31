@@ -1,5 +1,6 @@
 import streamlit as st
 from db_handler import DatabaseManager
+from shelf_map.shelf_map_handler import ShelfMapHandler
 import plotly.graph_objects as go
 
 try:
@@ -13,29 +14,35 @@ class DeclareHandler(DatabaseManager):
         df = self.fetch_data("""
             SELECT itemid, itemnameenglish AS name, barcode,
                    familycat, sectioncat, departmentcat, classcat
-            FROM item WHERE barcode = %s LIMIT 1
+            FROM item
+            WHERE barcode = %s
+            LIMIT 1
         """, (barcode,))
         return df.iloc[0] if not df.empty else None
 
     def get_shelf_entries(self, itemid):
         df = self.fetch_data("""
             SELECT locid, SUM(quantity) as qty
-            FROM shelf WHERE itemid=%s
-            GROUP BY locid ORDER BY locid
+            FROM shelf
+            WHERE itemid=%s
+            GROUP BY locid
+            ORDER BY locid
         """, (int(itemid),))
         return df
 
     def get_inventory_total(self, itemid):
         df = self.fetch_data("""
             SELECT SUM(quantity) as total
-            FROM inventory WHERE itemid=%s AND quantity > 0
+            FROM inventory
+            WHERE itemid=%s AND quantity > 0
         """, (int(itemid),))
         return int(df.iloc[0]['total']) if not df.empty and df.iloc[0]['total'] is not None else 0
 
     def subtract_inventory(self, itemid, qty):
         batches = self.fetch_data("""
             SELECT expirationdate, cost_per_unit, quantity
-            FROM inventory WHERE itemid=%s AND quantity > 0
+            FROM inventory
+            WHERE itemid=%s AND quantity > 0
             ORDER BY expirationdate ASC, cost_per_unit ASC
         """, (int(itemid),))
         left = qty
@@ -54,13 +61,6 @@ class DeclareHandler(DatabaseManager):
         return qty - left
 
     def set_shelf_quantity(self, itemid, locid, qty):
-        # ONLY allow locids that are present in shelf_map_locations!
-        valid = self.fetch_data(
-            "SELECT locid FROM shelf_map_locations WHERE locid=%s",
-            (locid,)
-        )
-        if valid.empty:
-            raise ValueError(f"locid {locid} is not present in shelf_map_locations")
         exists = self.fetch_data(
             "SELECT quantity FROM shelf WHERE itemid=%s AND locid=%s",
             (int(itemid), locid)
@@ -75,21 +75,21 @@ class DeclareHandler(DatabaseManager):
                 UPDATE shelf SET quantity=%s WHERE itemid=%s AND locid=%s
             """, (qty, int(itemid), locid))
 
-    def get_all_locs(self):
+    def get_all_locids(self):
+        # Get from shelf_map_locations
         df = self.fetch_data("""
-            SELECT locid, label, x_pct, y_pct, w_pct, h_pct, COALESCE(rotation_deg,0) as rotation_deg
-            FROM shelf_map_locations ORDER BY locid
+            SELECT locid FROM shelf_map_locations ORDER BY locid
         """)
-        return df
+        return df["locid"].tolist() if not df.empty else []
 
-def map_with_labels_and_highlight(locs_df, highlight_locs, label_offset=0.018):
+def map_with_labels_and_highlight(locs, highlight_locs, label_offset=0.018):
     import math
     shapes = []
     all_labels = []
     highlight_set = set(highlight_locs)
-    for _, row in locs_df.iterrows():
+    for row in locs:
         x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
-        deg = float(row["rotation_deg"])
+        deg = float(row.get("rotation_deg") or 0)
         cx, cy = x + w/2, 1 - (y + h/2)
         y_draw = 1 - y - h
         is_hi = row["locid"] in highlight_set
@@ -113,7 +113,7 @@ def map_with_labels_and_highlight(locs_df, highlight_locs, label_offset=0.018):
             "x": x + w/2,
             "y": 1 - (y + h/2),
             "highlight": is_hi,
-            "label": row["label"] if "label" in row and row["label"] else row["locid"]
+            "label": row.get("label", row["locid"])
         })
     fig = go.Figure()
     fig.update_layout(shapes=shapes, height=340, margin=dict(l=12,r=12,t=10,b=5),
@@ -126,21 +126,20 @@ def map_with_labels_and_highlight(locs_df, highlight_locs, label_offset=0.018):
             y=label["y"] + (label_offset if label["highlight"] else 0),
             text=label["label"],
             showarrow=False,
-            font=dict(size=11, color="#c90000" if label["highlight"] else "#777", family="monospace",),
+            font=dict(size=11, color="#c90000" if label["highlight"] else "#888", family="monospace",),
             align="center",
-            bgcolor="rgba(255,255,255,0.99)" if label["highlight"] else "rgba(245,245,245,0.75)",
-            bordercolor="#d8000c" if label["highlight"] else "#aaa",
+            bgcolor="rgba(255,255,255,0.99)" if label["highlight"] else "rgba(235,235,235,0.7)",
+            bordercolor="#d8000c" if label["highlight"] else "#bbb",
             borderpad=2,
-            opacity=0.99 if label["highlight"] else 0.72,
+            opacity=0.99 if label["highlight"] else 0.7,
         )
     return fig
 
 st.set_page_config(layout="centered")
-st.title("🟢 Declare Selling Area Quantity (by Barcode, Map & Location)")
+st.title("🟢 Declare Selling Area Quantity (Barcode, Map, & Location)")
 
 handler = DeclareHandler()
-locs_df = handler.get_all_locs()
-all_locids = locs_df["locid"].tolist()
+map_handler = ShelfMapHandler()
 
 st.markdown("""
 <style>
@@ -182,6 +181,9 @@ def declare_logic(barcode, reset_callback):
         itemid = int(item['itemid'])
         shelf_entries = handler.get_shelf_entries(itemid)
         inventory_total = handler.get_inventory_total(itemid)
+        all_locids = handler.get_all_locids()
+        shelfmap_locs = map_handler.get_locations()
+
         prev_qty = 0
         prev_locid = ""
         if shelf_entries.empty:
@@ -190,17 +192,22 @@ def declare_logic(barcode, reset_callback):
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
-        # Only allow locids from shelf_map_locations
-        locid = st.selectbox(
+        locid = st.text_input(
             "Shelf Location (locid)",
-            options=all_locids,
-            index=all_locids.index(prev_locid) if prev_locid in all_locids else 0,
+            value=prev_locid,
             key="declare_locid",
-            help="Select the shelf location."
+            max_chars=32,
+            help="Start typing to see suggested locations."
         )
-
+        highlight = [locid] if locid and locid in [l['locid'] for l in shelfmap_locs] else []
         st.markdown("#### 📍 Shelf Location Map")
-        st.plotly_chart(map_with_labels_and_highlight(locs_df, [locid]), use_container_width=True, key="declare_map")
+        st.plotly_chart(map_with_labels_and_highlight(shelfmap_locs, highlight), use_container_width=True, key="declare_map")
+
+        loc_suggestions = [x for x in all_locids if locid.strip().lower() in x.lower()][:8] if locid else all_locids[:8]
+        if locid and locid not in all_locids and loc_suggestions:
+            st.caption("Closest matches: " + ", ".join(f"`{l}`" for l in loc_suggestions))
+        elif not locid and all_locids:
+            st.caption("Sample locations: " + ", ".join(f"`{l}`" for l in all_locids[:8]))
 
         st.info(f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
                 f"**Available in inventory:** {inventory_total}")
