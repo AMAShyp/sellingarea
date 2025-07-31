@@ -81,16 +81,18 @@ class DeclareHandler(DatabaseManager):
         """)
         return df["locid"].tolist() if not df.empty else []
 
-def map_with_highlights(locs, highlight_locs, label_offset=0.018):
+def map_with_labels_and_highlight(locs, highlight_locs, label_offset=0.018):
     import math
     shapes = []
+    all_labels = []
+    highlight_set = set(highlight_locs)
     for row in locs:
         x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
         cx, cy = x + w/2, 1 - (y + h/2)
         y_draw = 1 - y - h
-        is_hi = row["locid"] in highlight_locs
-        fill = "rgba(220,53,69,0.34)" if is_hi else "rgba(180,180,180,0.11)"
+        is_hi = row["locid"] in highlight_set
+        fill = "rgba(220,53,69,0.34)" if is_hi else "rgba(180,180,180,0.09)"
         line = dict(width=2 if is_hi else 1.2, color="#d8000c" if is_hi else "#888")
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
@@ -105,30 +107,37 @@ def map_with_highlights(locs, highlight_locs, label_offset=0.018):
             shapes.append(dict(type="circle",xref="x",yref="y",
                                x0=cx-r,x1=cx+r,y0=cy-r,y1=cy+r,
                                line=dict(color="#d8000c",width=2,dash="dot")))
+        all_labels.append({
+            "locid": row["locid"],
+            "x": x + w/2,
+            "y": 1 - (y + h/2),
+            "highlight": is_hi,
+            "label": row.get("label", row["locid"])
+        })
+
     fig = go.Figure()
     fig.update_layout(shapes=shapes, height=340, margin=dict(l=12,r=12,t=10,b=5),
                       plot_bgcolor="#f8f9fa")
     fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
-    for row in locs:
-        if row["locid"] in highlight_locs:
-            x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
-            fig.add_annotation(
-                x=x + w/2,
-                y=1 - (y + h/2) + label_offset,
-                text=row.get("label",row["locid"]),
-                showarrow=False,
-                font=dict(size=11, color="#c90000", family="monospace"),
-                align="center",
-                bgcolor="rgba(255,255,255,0.92)",
-                bordercolor="#d8000c",
-                borderpad=2,
-                opacity=0.97,
-            )
+    # Draw all labels (grey by default, red if highlight)
+    for label in all_labels:
+        fig.add_annotation(
+            x=label["x"],
+            y=label["y"] + (label_offset if label["highlight"] else 0),
+            text=label["label"],
+            showarrow=False,
+            font=dict(size=11, color="#c90000" if label["highlight"] else "#777", family="monospace",),
+            align="center",
+            bgcolor="rgba(255,255,255,0.99)" if label["highlight"] else "rgba(245,245,245,0.75)",
+            bordercolor="#d8000c" if label["highlight"] else "#aaa",
+            borderpad=2,
+            opacity=0.99 if label["highlight"] else 0.72,
+        )
     return fig
 
 st.set_page_config(layout="centered")
-st.title("🟢 Declare Selling Area Quantity (by Barcode)")
+st.title("🟢 Declare Selling Area Quantity (by Barcode, Map & Location)")
 
 handler = DeclareHandler()
 map_handler = ShelfMapHandler()
@@ -191,10 +200,9 @@ def declare_logic(barcode, reset_callback):
             max_chars=32,
             help="Start typing to see suggested locations."
         )
-        # Show map with highlight for the entered location if it exists
         highlight = [locid] if locid and locid in [l['locid'] for l in shelfmap_locs] else []
         st.markdown("#### 📍 Shelf Location Map")
-        st.plotly_chart(map_with_highlights(shelfmap_locs, highlight), use_container_width=True, key="declare_map")
+        st.plotly_chart(map_with_labels_and_highlight(shelfmap_locs, highlight), use_container_width=True, key="declare_map")
 
         loc_suggestions = [x for x in all_locids if locid.strip().lower() in x.lower()][:8] if locid else all_locids[:8]
         if locid and locid not in all_locids and loc_suggestions:
