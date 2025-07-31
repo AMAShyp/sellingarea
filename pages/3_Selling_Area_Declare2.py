@@ -78,7 +78,7 @@ class DeclareHandler(DatabaseManager):
     def get_all_locs(self):
         df = self.fetch_data("""
             SELECT locid, label, x_pct, y_pct, w_pct, h_pct, COALESCE(rotation_deg,0) as rotation_deg
-            FROM shelf_map_locations_2 ORDER BY locid
+            FROM shelf_map_locations ORDER BY locid
         """)
         return df
 
@@ -190,7 +190,7 @@ def declare_logic(barcode, reset_callback):
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
 
-        # Only allow locids from shelf_map_locations_2
+        # Only allow locids from shelf_map_locations
         locid = st.selectbox(
             "Shelf Location (locid)",
             options=all_locids,
