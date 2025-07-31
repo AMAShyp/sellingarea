@@ -60,7 +60,7 @@ class DeclareHandler(DatabaseManager):
             (locid,)
         )
         if valid.empty:
-            raise ValueError(f"locid {locid} is not present in shelf_map_locations_2")
+            raise ValueError(f"locid {locid} is not present in shelf_map_locations")
         exists = self.fetch_data(
             "SELECT quantity FROM shelf WHERE itemid=%s AND locid=%s",
             (int(itemid), locid)
