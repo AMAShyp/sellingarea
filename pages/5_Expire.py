@@ -57,10 +57,9 @@ st.title("⏰ Near Expiry Shelf Items")
 try:
     shelf_handler = ShelfHandler()
     shelf_df = shelf_handler.get_shelf_items()
-    st.write("DEBUG: Raw shelf_df columns", list(shelf_df.columns))
-    st.write("DEBUG: Raw shelf_df sample", shelf_df.head())
+    # Make all columns lower-case for robustness
     shelf_df.columns = [c.lower() for c in shelf_df.columns]
-    st.write("DEBUG: shelf_df (lower-case) columns", list(shelf_df.columns))
+    st.write("DEBUG: shelf_df shape", shelf_df.shape)
     if shelf_df.empty:
         st.info("No items in the selling area.")
         st.stop()
@@ -68,10 +67,6 @@ try:
     # Map handler and locations
     map_handler = ShelfMapHandler()
     shelf_locs = map_handler.get_locations()
-    # Debug map data
-    st.write("DEBUG: Map shelf_locs count", len(shelf_locs))
-    if len(shelf_locs) > 0:
-        st.write("DEBUG: Map shelf_locs sample", pd.DataFrame(shelf_locs).head())
 
     today = pd.to_datetime(date.today())
     shelf_df["expirationdate"] = pd.to_datetime(shelf_df["expirationdate"])
@@ -79,13 +74,8 @@ try:
 
     # bring shelf-life info
     item_df = shelf_handler.fetch_data("SELECT itemid, shelflife FROM item")
-    st.write("DEBUG: Raw item_df columns", list(item_df.columns))
-    st.write("DEBUG: Raw item_df sample", item_df.head())
     item_df.columns = [c.lower() for c in item_df.columns]
-    st.write("DEBUG: item_df (lower-case) columns", list(item_df.columns))
     shelf_df = shelf_df.merge(item_df, on="itemid", how="left")
-    st.write("DEBUG: shelf_df after merge columns", list(shelf_df.columns))
-    st.write("DEBUG: shelf_df after merge sample", shelf_df.head())
 
     subtab_days, subtab_percent = st.tabs(["📅 Days-Based", "📐 Shelf Life %"])
 
@@ -111,16 +101,15 @@ try:
         )
 
         near_expiry_df = shelf_df[shelf_df["days_left"] <= green_days].copy()
-        st.write("DEBUG: near_expiry_df columns", list(near_expiry_df.columns))
-        st.write("DEBUG: near_expiry_df sample", near_expiry_df.head())
+        st.write("DEBUG: near_expiry_df shape", near_expiry_df.shape)
         if near_expiry_df.empty:
             st.success(
                 f"✅ No items expiring within {green_days} days."
             )
         else:
+            # Defensive: check for locid
             if "locid" not in near_expiry_df.columns:
-                st.error("Column 'locid' not found in your shelf data! Here are columns: " + ", ".join(near_expiry_df.columns))
-                st.write(near_expiry_df.head())
+                st.error("Column 'locid' not found in your shelf data!")
                 st.stop()
             hi_locs = sorted(set(near_expiry_df["locid"].dropna().unique()))
             st.markdown("#### 🗺️ Shelf Map: Red = shelves with near-expiry items")
@@ -186,8 +175,7 @@ try:
         fraction_df = shelf_df[
             (shelf_df["shelflife"].notna()) & (shelf_df["shelflife"] > 0)
         ].copy()
-        st.write("DEBUG: fraction_df columns", list(fraction_df.columns))
-        st.write("DEBUG: fraction_df sample", fraction_df.head())
+        st.write("DEBUG: fraction_df shape", fraction_df.shape)
 
         if fraction_df.empty:
             st.info("No items have a positive shelf life defined.")
@@ -198,16 +186,14 @@ try:
             alerts_frac_df = fraction_df[
                 fraction_df["fraction_left"] <= green_frac
             ].copy()
-            st.write("DEBUG: alerts_frac_df columns", list(alerts_frac_df.columns))
-            st.write("DEBUG: alerts_frac_df sample", alerts_frac_df.head())
+            st.write("DEBUG: alerts_frac_df shape", alerts_frac_df.shape)
             if alerts_frac_df.empty:
                 st.success(
                     "✅ No items are below the selected fraction of shelf life."
                 )
             else:
                 if "locid" not in alerts_frac_df.columns:
-                    st.error("Column 'locid' not found in your shelf data! Here are columns: " + ", ".join(alerts_frac_df.columns))
-                    st.write(alerts_frac_df.head())
+                    st.error("Column 'locid' not found in your shelf data!")
                     st.stop()
                 hi_locs = sorted(set(alerts_frac_df["locid"].dropna().unique()))
                 st.markdown("#### 🗺️ Shelf Map: Red = shelves with near-expiry items (by shelf life %)")
@@ -249,7 +235,6 @@ try:
         missing = shelf_df[
             (shelf_df["shelflife"].isna()) | (shelf_df["shelflife"] <= 0)
         ]
-        st.write("DEBUG: missing shelf-life items", missing.head())
         if not missing.empty:
             st.markdown("---")
             st.error(
