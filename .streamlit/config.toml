@@ -1,0 +1,15 @@
+[neon]
+dsn = "postgresql://postgres:Garnet87@188.36.44.146:5432/neondb_clone_20250711_163036?sslmode=disable"
+
+
+
+
+
+
+[auth]
+redirect_uri = "https://amas-hypermarket.streamlit.app/oauth2callback"
+cookie_secret = "S53560f7bc774e9619a02fd94058826b047ed076dac31a2bc2baf4a507c9f9c76"
+
+client_id = "590310049041-vtfggsiu8bu368bdpnhnp1nrkd99arjc.apps.googleusercontent.com"
+client_secret = "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"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
