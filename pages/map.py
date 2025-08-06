@@ -36,16 +36,26 @@ def build_clusters(locs):
 
 def color_for_idx(idx):
     COLORS = [
-        "rgba(220,53,69,0.27)",     # red
-        "rgba(2,117,216,0.22)",     # blue
-        "rgba(92,184,92,0.21)",     # green
-        "rgba(240,173,78,0.17)",    # orange
-        "rgba(155,89,182,0.19)",    # purple
-        "rgba(51,51,51,0.14)",      # gray
-        "rgba(128,0,128,0.18)",     # violet
-        "rgba(0,128,128,0.18)",     # teal
+        "#dc3545",  # red
+        "#0275d8",  # blue
+        "#5cb85c",  # green
+        "#f0ad4e",  # orange
+        "#9b59b6",  # purple
+        "#333333",  # gray/black
+        "#800080",  # violet
+        "#008080",  # teal
+        "#FFD700",  # gold
+        "#E67E22",  # carrot
+        "#C0392B",  # dark red
+        "#16A085",  # dark teal
+        "#7B241C",  # brown red
+        "#1ABC9C",  # turquoise
     ]
-    return COLORS[idx % len(COLORS)]
+    # for map: convert #rgb to rgba with alpha
+    hexcol = COLORS[idx % len(COLORS)]
+    return "rgba({}, {}, {}, 0.22)".format(
+        int(hexcol[1:3],16), int(hexcol[3:5],16), int(hexcol[5:7],16)
+    ), COLORS[idx % len(COLORS)]
 
 def map_with_clusters(locs, clusters=None):
     import math
@@ -53,10 +63,13 @@ def map_with_clusters(locs, clusters=None):
     min_x = min_y = float("inf")
     max_x = max_y = float("-inf")
     cluster_map = {}
+    color_map = {}
     if clusters:
         for ci, clist in enumerate(clusters):
+            rgba, hexcol = color_for_idx(ci)
             for idx in clist:
                 cluster_map[idx] = ci
+                color_map[ci] = (rgba, hexcol)
     for idx, row in enumerate(locs):
         x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
@@ -66,7 +79,10 @@ def map_with_clusters(locs, clusters=None):
         min_y = min(min_y, y_draw)
         max_x = max(max_x, x + w)
         max_y = max(max_y, y_draw + h)
-        fill = color_for_idx(cluster_map[idx]) if clusters else "rgba(180,180,180,0.11)"
+        if clusters:
+            fill = color_map[cluster_map[idx]][0]
+        else:
+            fill = "rgba(180,180,180,0.11)"
         line = dict(width=1.2, color="#888")
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
@@ -87,7 +103,7 @@ def map_with_clusters(locs, clusters=None):
     expand_y = (max_y - min_y) * 0.07
     fig.update_xaxes(visible=False, range=[min_x - expand_x, max_x + expand_x], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[min_y - expand_y, max_y + expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
-    return fig
+    return fig, color_map
 
 st.set_page_config(layout="centered")
 st.title("🗺️ Shelf Map")
@@ -99,9 +115,22 @@ cluster_mode = st.checkbox("Show shelf clusters (by physical neighborhood/alignm
 
 if cluster_mode:
     clusters = build_clusters(shelf_locs)
-    fig = map_with_clusters(shelf_locs, clusters)
+    fig, color_map = map_with_clusters(shelf_locs, clusters)
+    st.plotly_chart(fig, use_container_width=True)
     st.info(f"Detected {len(clusters)} shelf clusters (connected shelf groups) on map.")
-else:
-    fig = map_with_clusters(shelf_locs, None)
 
-st.plotly_chart(fig, use_container_width=True)
+    st.markdown("---")
+    st.markdown("### 🟦 Cluster Details")
+    for i, cluster in enumerate(clusters):
+        rgba, hexcol = color_for_idx(i)
+        st.markdown(
+            f"<div style='display:inline-block;width:1.5em;height:1.5em;background:{hexcol};border-radius:4px;margin-right:0.5em;vertical-align:middle;'></div>"
+            f"<b>Cluster {i+1}</b> <span style='color:{hexcol};font-size:0.98em;'>{hexcol}</span>",
+            unsafe_allow_html=True
+        )
+        locids = [shelf_locs[idx]['locid'] for idx in cluster]
+        df = {"locid": [str(locid) for locid in locids]}
+        st.table(df)
+else:
+    fig, _ = map_with_clusters(shelf_locs, None)
+    st.plotly_chart(fig, use_container_width=True)
