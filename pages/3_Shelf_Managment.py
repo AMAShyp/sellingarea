@@ -68,21 +68,28 @@ st.title("🗄️ Bulk Shelf Items Management")
 handler = ShelfManagementHandler()
 
 all_locids = handler.get_all_locids()
-all_items_df = handler.get_all_shelf_items(all_locids)   # <<-- Items with 0 already filtered out
+all_items_df = handler.get_all_shelf_items(all_locids)   # Items with 0 already filtered out
 
 if all_items_df.empty:
     st.info("No items with positive quantity found in the filtered shelves.")
     st.stop()
 
-selected_locid = st.selectbox(
-    "Select shelf location for bulk update:",
+# MULTI-SELECT dropdown for shelves
+selected_locids = st.multiselect(
+    "Select shelf location(s) for bulk update:",
     options=all_locids,
-    index=0
+    default=all_locids[:1] if all_locids else []
 )
 
-items_in_loc = all_items_df[all_items_df["locid"] == selected_locid].copy()
-if items_in_loc.empty:
-    st.info(f"No items with positive quantity currently on shelf `{selected_locid}`.")
+if not selected_locids:
+    st.warning("Select at least one shelf to bulk update.")
+    st.stop()
+
+# Filter items for selected shelves
+items_in_locs = all_items_df[all_items_df["locid"].isin(selected_locids)].copy()
+
+if items_in_locs.empty:
+    st.info(f"No items with positive quantity currently on the selected shelves.")
 else:
     st.markdown("<b>Set a general quantity for ALL items below (overrides individual boxes):</b>", unsafe_allow_html=True)
     general_qty = st.number_input(
@@ -91,35 +98,37 @@ else:
         max_value=99999,
         value=None,
         step=1,
-        key=f"bulk_generalqty_{selected_locid}"
+        key=f"bulk_generalqty_{'_'.join(selected_locids)}"
     )
 
     st.markdown("#### Adjust if needed, then click <b>Apply Bulk Update</b>", unsafe_allow_html=True)
     bulk_changes = {}
-    for idx, row in items_in_loc.iterrows():
-        itemid = row["itemid"]
-        name = row["name"]
-        barcode = row["barcode"]
-        shelf_qty = int(row["quantity"])
+    # Loop by shelf (locid), then items
+    for locid in selected_locids:
+        st.markdown(f"<div style='background:#f7f7f7;padding:0.5em 1em 0.4em 1em;border-radius:0.3em;margin-top:1.3em;margin-bottom:0.4em'><b>Shelf: <span style='color:#1575ad'>{locid}</span></b></div>", unsafe_allow_html=True)
+        shelf_items = items_in_locs[items_in_locs["locid"] == locid]
+        for idx, row in shelf_items.iterrows():
+            itemid = row["itemid"]
+            name = row["name"]
+            barcode = row["barcode"]
+            shelf_qty = int(row["quantity"])
+            init_value = general_qty if general_qty is not None else shelf_qty
 
-        # If general_qty is not None, override default value
-        init_value = general_qty if general_qty is not None else shelf_qty
-
-        new_qty = st.number_input(
-            f"{name} ({barcode})",
-            min_value=0,
-            max_value=99999,
-            value=init_value,
-            step=1,
-            key=f"bulkqty_{selected_locid}_{itemid}"
-        )
-        bulk_changes[itemid] = (shelf_qty, int(new_qty), name, barcode)
+            new_qty = st.number_input(
+                f"{name} ({barcode}) [on {locid}]",
+                min_value=0,
+                max_value=99999,
+                value=init_value,
+                step=1,
+                key=f"bulkqty_{locid}_{itemid}"
+            )
+            bulk_changes[(itemid, locid)] = (shelf_qty, int(new_qty), name, barcode, locid)
 
     if st.button("💾 Apply Bulk Update", key="apply_bulk_update"):
         changed = False
-        for itemid, (old_qty, new_qty, name, barcode) in bulk_changes.items():
+        for (itemid, locid), (old_qty, new_qty, name, barcode, locid_) in bulk_changes.items():
             if new_qty != old_qty:
-                handler.update_shelf_quantity(itemid, selected_locid, new_qty)
+                handler.update_shelf_quantity(itemid, locid, new_qty)
                 changed = True
                 if new_qty == 0 and old_qty > 0:
                     handler.return_to_inventory(itemid, old_qty)
@@ -132,19 +141,20 @@ else:
     # Table preview: only items that would remain with positive qty or whose qty is being changed
     preview_data = [
         {
+            "Shelf": locid,
             "Item Name": name,
             "Barcode": barcode,
             "Old Shelf Qty": old_qty,
             "New Shelf Qty": new_qty
         }
-        for itemid, (old_qty, new_qty, name, barcode) in bulk_changes.items()
+        for (itemid, locid), (old_qty, new_qty, name, barcode, locid_) in bulk_changes.items()
         if old_qty > 0 or new_qty > 0
     ]
     if preview_data:
         st.markdown("#### Bulk change preview")
         st.dataframe(pd.DataFrame(preview_data), hide_index=True, use_container_width=True)
     else:
-        st.info("All items would be removed from the shelf.")
+        st.info("All items would be removed from the shelves.")
 
 st.markdown(
     "<div style='margin-top:2em;color:#bbb;font-size:1em'>"
