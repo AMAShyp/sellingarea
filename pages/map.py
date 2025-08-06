@@ -51,25 +51,49 @@ def color_for_idx(idx):
         "#7B241C",  # brown red
         "#1ABC9C",  # turquoise
     ]
-    # for map: convert #rgb to rgba with alpha
     hexcol = COLORS[idx % len(COLORS)]
-    return "rgba({}, {}, {}, 0.22)".format(
+    rgba = "rgba({}, {}, {}, 0.22)".format(
         int(hexcol[1:3],16), int(hexcol[3:5],16), int(hexcol[5:7],16)
-    ), COLORS[idx % len(COLORS)]
+    )
+    return rgba, hexcol
 
-def map_with_clusters(locs, clusters=None):
+def map_with_clusters(locs, clusters):
     import math
     shapes = []
+    cluster_labels_x = []
+    cluster_labels_y = []
+    cluster_labels_text = []
     min_x = min_y = float("inf")
     max_x = max_y = float("-inf")
     cluster_map = {}
     color_map = {}
-    if clusters:
-        for ci, clist in enumerate(clusters):
-            rgba, hexcol = color_for_idx(ci)
-            for idx in clist:
-                cluster_map[idx] = ci
-                color_map[ci] = (rgba, hexcol)
+    cluster_centroids = {}
+    for ci, clist in enumerate(clusters):
+        rgba, hexcol = color_for_idx(ci)
+        for idx in clist:
+            cluster_map[idx] = ci
+            color_map[ci] = (rgba, hexcol)
+        # Centroid calculation for the cluster (average center of its shelves)
+        cx_all, cy_all = [], []
+        for idx in clist:
+            x, y, w, h = map(to_float, (locs[idx]["x_pct"], locs[idx]["y_pct"], locs[idx]["w_pct"], locs[idx]["h_pct"]))
+            deg = float(locs[idx].get("rotation_deg") or 0)
+            if deg == 0:
+                cx = x + w/2
+                cy = 1 - (y + h/2)
+            else:
+                # For rotated, use center before rotation (approximate)
+                cx = x + w/2
+                cy = 1 - (y + h/2)
+            cx_all.append(cx)
+            cy_all.append(cy)
+        centroid_x = sum(cx_all) / len(cx_all)
+        centroid_y = sum(cy_all) / len(cy_all)
+        cluster_centroids[ci] = (centroid_x, centroid_y)
+        cluster_labels_x.append(centroid_x)
+        cluster_labels_y.append(centroid_y)
+        cluster_labels_text.append(color_map[ci][1])
+
     for idx, row in enumerate(locs):
         x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
@@ -79,10 +103,7 @@ def map_with_clusters(locs, clusters=None):
         min_y = min(min_y, y_draw)
         max_x = max(max_x, x + w)
         max_y = max(max_y, y_draw + h)
-        if clusters:
-            fill = color_map[cluster_map[idx]][0]
-        else:
-            fill = "rgba(180,180,180,0.11)"
+        fill = color_map[cluster_map[idx]][0]
         line = dict(width=1.2, color="#888")
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
@@ -103,6 +124,18 @@ def map_with_clusters(locs, clusters=None):
     expand_y = (max_y - min_y) * 0.07
     fig.update_xaxes(visible=False, range=[min_x - expand_x, max_x + expand_x], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[min_y - expand_y, max_y + expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
+    # Add cluster color codes as map annotations
+    fig.add_scatter(
+        x=cluster_labels_x,
+        y=cluster_labels_y,
+        text=cluster_labels_text,
+        mode="text",
+        textposition="middle center",
+        textfont=dict(size=18, color="#19375a", family="monospace"),
+        showlegend=False,
+        hoverinfo="none",
+        name="Cluster Color Code"
+    )
     return fig, color_map
 
 st.set_page_config(layout="centered")
@@ -111,26 +144,18 @@ st.title("🗺️ Shelf Map")
 map_handler = ShelfMapHandler()
 shelf_locs = map_handler.get_locations()
 
-cluster_mode = st.checkbox("Show shelf clusters (by physical neighborhood/alignment)", value=False)
+clusters = build_clusters(shelf_locs)
+fig, color_map = map_with_clusters(shelf_locs, clusters)
+st.plotly_chart(fig, use_container_width=True)
 
-if cluster_mode:
-    clusters = build_clusters(shelf_locs)
-    fig, color_map = map_with_clusters(shelf_locs, clusters)
-    st.plotly_chart(fig, use_container_width=True)
-    st.info(f"Detected {len(clusters)} shelf clusters (connected shelf groups) on map.")
-
-    st.markdown("---")
-    st.markdown("### 🟦 Cluster Details")
-    for i, cluster in enumerate(clusters):
-        rgba, hexcol = color_for_idx(i)
-        st.markdown(
-            f"<div style='display:inline-block;width:1.5em;height:1.5em;background:{hexcol};border-radius:4px;margin-right:0.5em;vertical-align:middle;'></div>"
-            f"<b>Cluster {i+1}</b> <span style='color:{hexcol};font-size:0.98em;'>{hexcol}</span>",
-            unsafe_allow_html=True
-        )
-        locids = [shelf_locs[idx]['locid'] for idx in cluster]
-        df = {"locid": [str(locid) for locid in locids]}
-        st.table(df)
-else:
-    fig, _ = map_with_clusters(shelf_locs, None)
-    st.plotly_chart(fig, use_container_width=True)
+st.markdown("---")
+st.markdown("### 🟦 Cluster Details")
+for i, cluster in enumerate(clusters):
+    rgba, hexcol = color_for_idx(i)
+    st.markdown(
+        f"<div style='display:inline-block;width:1.5em;height:1.5em;background:{hexcol};border-radius:4px;margin-right:0.5em;vertical-align:middle;'></div>"
+        f"<b>Cluster {i+1}</b> <span style='color:{hexcol};font-size:0.98em;'>{hexcol}</span>",
+        unsafe_allow_html=True
+    )
+    locids = [shelf_locs[idx]['locid'] for idx in cluster]
+    st.table({"locid": [str(locid) for locid in locids]})
