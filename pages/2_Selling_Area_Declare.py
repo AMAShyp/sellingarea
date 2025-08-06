@@ -191,7 +191,7 @@ def map_with_highlights_and_textlabels(locs, highlight_locs):
         x=label_x, y=label_y, text=label_text,
         mode="text",
         textposition="middle center",
-        textfont=dict(size=13, color="#19375a", family="monospace"),
+        textfont=dict(size=8, color="#19375a", family="monospace"),
         showlegend=False,
         hoverinfo="none",
         name="LocID Labels"
