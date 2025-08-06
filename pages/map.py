@@ -2,24 +2,27 @@ import streamlit as st
 import plotly.graph_objects as go
 from shelf_map.shelf_map_handler import ShelfMapHandler
 
-def shelves_are_adjacent(a, b, tol=1e-5):
-    # a, b: shelf dicts with x, y, w, h, rotation_deg (assume deg=0 for adjacency)
-    # If you use rotated rectangles, you need a more advanced collision test!
-    ax1, ay1 = a['x_pct'], a['y_pct']
-    ax2, ay2 = ax1 + a['w_pct'], ay1 + a['h_pct']
-    bx1, by1 = b['x_pct'], b['y_pct']
-    bx2, by2 = bx1 + b['w_pct'], by1 + b['h_pct']
-    # Test for rectangle touching or overlapping
+def to_float(x):
+    try:
+        return float(x)
+    except:
+        return 0.0
+
+def shelves_are_adjacent(a, b, tol=1e-7):
+    # Accepts shelf dicts. Works for axis-aligned rectangles only.
+    ax1, ay1, aw, ah = map(to_float, (a['x_pct'], a['y_pct'], a['w_pct'], a['h_pct']))
+    bx1, by1, bw, bh = map(to_float, (b['x_pct'], b['y_pct'], b['w_pct'], b['h_pct']))
+    ax2, ay2 = ax1 + aw, ay1 + ah
+    bx2, by2 = bx1 + bw, by1 + bh
+    # Check for rectangles touching or overlapping (using <= and >= with tolerance)
     return not (ax2 < bx1 - tol or bx2 < ax1 - tol or ay2 < by1 - tol or by2 < ay1 - tol)
 
 def build_clusters(locs):
-    # Build clusters of adjacent shelves (connected components)
     n = len(locs)
-    visited = [False]*n
+    visited = [False] * n
     clusters = []
     for i in range(n):
         if not visited[i]:
-            # BFS
             cluster = []
             queue = [i]
             visited[i] = True
@@ -34,14 +37,15 @@ def build_clusters(locs):
     return clusters
 
 def color_for_idx(idx):
-    # Cycle through some visible, neutral colors (add more if many clusters)
     COLORS = [
-        "rgba(220,53,69,0.29)",
-        "rgba(2,117,216,0.22)",
-        "rgba(92,184,92,0.21)",
-        "rgba(240,173,78,0.19)",
-        "rgba(155,89,182,0.19)",
-        "rgba(51,51,51,0.14)"
+        "rgba(220,53,69,0.27)",     # red
+        "rgba(2,117,216,0.22)",     # blue
+        "rgba(92,184,92,0.21)",     # green
+        "rgba(240,173,78,0.17)",    # orange
+        "rgba(155,89,182,0.19)",    # purple
+        "rgba(51,51,51,0.14)",      # gray
+        "rgba(128,0,128,0.18)",     # violet
+        "rgba(0,128,128,0.18)",     # teal
     ]
     return COLORS[idx % len(COLORS)]
 
@@ -56,9 +60,8 @@ def map_with_clusters(locs, clusters=None):
         for ci, clist in enumerate(clusters):
             for idx in clist:
                 cluster_map[idx] = ci
-
     for idx, row in enumerate(locs):
-        x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
+        x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
         cx, cy = x + w/2, 1 - (y + h/2)
         y_draw = 1 - y - h
@@ -86,11 +89,11 @@ def map_with_clusters(locs, clusters=None):
         label_text.append(row.get("label", row["locid"]))
 
     fig = go.Figure()
-    fig.update_layout(shapes=shapes, height=460, margin=dict(l=12,r=12,t=10,b=5), plot_bgcolor="#f8f9fa")
+    fig.update_layout(shapes=shapes, height=460, margin=dict(l=12, r=12, t=10, b=5), plot_bgcolor="#f8f9fa")
     expand_x = (max_x - min_x) * 0.07
     expand_y = (max_y - min_y) * 0.07
-    fig.update_xaxes(visible=False, range=[min_x-expand_x, max_x+expand_x], constrain="domain", fixedrange=True)
-    fig.update_yaxes(visible=False, range=[min_y-expand_y, max_y+expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
+    fig.update_xaxes(visible=False, range=[min_x - expand_x, max_x + expand_x], constrain="domain", fixedrange=True)
+    fig.update_yaxes(visible=False, range=[min_y - expand_y, max_y + expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
     fig.add_scatter(
         x=label_x, y=label_y, text=label_text,
         mode="text",
