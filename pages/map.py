@@ -9,12 +9,10 @@ def to_float(x):
         return 0.0
 
 def shelves_are_adjacent(a, b, tol=1e-7):
-    # Accepts shelf dicts. Works for axis-aligned rectangles only.
     ax1, ay1, aw, ah = map(to_float, (a['x_pct'], a['y_pct'], a['w_pct'], a['h_pct']))
     bx1, by1, bw, bh = map(to_float, (b['x_pct'], b['y_pct'], b['w_pct'], b['h_pct']))
     ax2, ay2 = ax1 + aw, ay1 + ah
     bx2, by2 = bx1 + bw, by1 + bh
-    # Check for rectangles touching or overlapping (using <= and >= with tolerance)
     return not (ax2 < bx1 - tol or bx2 < ax1 - tol or ay2 < by1 - tol or by2 < ay1 - tol)
 
 def build_clusters(locs):
@@ -52,7 +50,6 @@ def color_for_idx(idx):
 def map_with_clusters(locs, clusters=None):
     import math
     shapes = []
-    label_x, label_y, label_text = [], [], []
     min_x = min_y = float("inf")
     max_x = max_y = float("-inf")
     cluster_map = {}
@@ -84,25 +81,12 @@ def map_with_clusters(locs, clusters=None):
             max_y = max([max_y] + [p[1] for p in abs_pts])
             path = "M " + " L ".join(f"{x_},{y_}" for x_, y_ in abs_pts) + " Z"
             shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
-        label_x.append(cx)
-        label_y.append(cy)
-        label_text.append(row.get("label", row["locid"]))
-
     fig = go.Figure()
     fig.update_layout(shapes=shapes, height=460, margin=dict(l=12, r=12, t=10, b=5), plot_bgcolor="#f8f9fa")
     expand_x = (max_x - min_x) * 0.07
     expand_y = (max_y - min_y) * 0.07
     fig.update_xaxes(visible=False, range=[min_x - expand_x, max_x + expand_x], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[min_y - expand_y, max_y + expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
-    fig.add_scatter(
-        x=label_x, y=label_y, text=label_text,
-        mode="text",
-        textposition="middle center",
-        textfont=dict(size=13, color="#19375a", family="monospace"),
-        showlegend=False,
-        hoverinfo="none",
-        name="LocID Labels"
-    )
     return fig
 
 st.set_page_config(layout="centered")
