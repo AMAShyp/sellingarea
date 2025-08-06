@@ -16,7 +16,10 @@ try:
 except ImportError:
     PLOTLY_EVENTS_AVAILABLE = False
 
-# --- NO CSV, NO FILTERING ---
+# --- LOAD filtered locid list from CSV ---
+LOCID_CSV_PATH = "assets/locid_list.csv"
+locid_df = pd.read_csv(LOCID_CSV_PATH)
+FILTERED_LOCIDS = set(str(l).strip() for l in locid_df["locid"].dropna().unique())
 
 class DeclareHandler(DatabaseManager):
     def get_item_by_barcode(self, barcode):
@@ -38,7 +41,7 @@ class DeclareHandler(DatabaseManager):
             HAVING SUM(quantity) > 0
             ORDER BY locid
         """, (int(itemid),))
-        return df if not df.empty else df
+        return df[df["locid"].isin(FILTERED_LOCIDS)] if not df.empty else df
 
     def get_inventory_total(self, itemid):
         df = self.fetch_data("""
@@ -92,11 +95,7 @@ class DeclareHandler(DatabaseManager):
                 """, (int(itemid), locid))
 
     def get_all_locids(self):
-        # No filtering! Use all locids present in shelf_map.
-        map_handler = ShelfMapHandler()
-        locs = map_handler.get_locations()
-        all_locids = sorted(str(row["locid"]) for row in locs)
-        return all_locids
+        return sorted(FILTERED_LOCIDS)
 
     def get_items_at_location(self, locid):
         df = self.fetch_data("""
@@ -108,7 +107,7 @@ class DeclareHandler(DatabaseManager):
         """, (locid,))
         return df if not df.empty else pd.DataFrame(columns=["itemid", "name", "barcode", "quantity"])
 
-def map_with_highlights_and_textlabels(locs, highlight_locs):
+def map_with_highlights_and_textlabels(locs, highlight_locs, allowed_locids):
     import math
     shapes = []
     polygons = []
@@ -123,6 +122,8 @@ def map_with_highlights_and_textlabels(locs, highlight_locs):
     any_loc = False
 
     for row in locs:
+        if str(row["locid"]) not in allowed_locids:
+            continue
         x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
         cx, cy = x + w/2, 1 - (y + h/2)
@@ -191,7 +192,7 @@ def map_with_highlights_and_textlabels(locs, highlight_locs):
         x=label_x, y=label_y, text=label_text,
         mode="text",
         textposition="middle center",
-        textfont=dict(size=8, color="#19375a", family="monospace"),
+        textfont=dict(size=13, color="#19375a", family="monospace"),
         showlegend=False,
         hoverinfo="none",
         name="LocID Labels"
@@ -251,7 +252,7 @@ def declare_logic(barcode, reset_callback):
         return
 
     if item is not None:
-        st.markdown(f"**Item:** {item['name']}<br>🔖 Barcode: `{item['barcode']}`", unsafe_allow_html=True)
+        st.markdown(f"**Item:** {item['name']}<br>🔖 Barcode: {item['barcode']}", unsafe_allow_html=True)
         st.markdown(
             f"<div class='catline'><span class='cat-class'>Class:</span> <span class='cat-val'>{item['classcat']}</span></div>"
             f"<div class='catline'><span class='cat-dept'>Department:</span> <span class='cat-val'>{item['departmentcat']}</span></div>"
@@ -262,11 +263,11 @@ def declare_logic(barcode, reset_callback):
         inventory_total = handler.get_inventory_total(itemid)
         all_locids = handler.get_all_locids()
 
-        shelf_locs = [row for row in map_handler.get_locations()]
+        shelf_locs = [row for row in map_handler.get_locations() if str(row["locid"]) in FILTERED_LOCIDS]
         highlight_locs = shelf_entries["locid"].tolist() if not shelf_entries.empty else []
 
         st.markdown("#### 🗺️ Shelf Map — click any cell to see shelf name/ID")
-        fig, polygons, trace_text = map_with_highlights_and_textlabels(shelf_locs, highlight_locs)
+        fig, polygons, trace_text = map_with_highlights_and_textlabels(shelf_locs, highlight_locs, FILTERED_LOCIDS)
         clicked_locid = None
 
         if PLOTLY_EVENTS_AVAILABLE:
@@ -279,7 +280,7 @@ def declare_logic(barcode, reset_callback):
                     st.success(f"You clicked: **{clicked_locid}**")
         else:
             st.plotly_chart(fig, use_container_width=True)
-            st.info("Install `streamlit-plotly-events` for click support: `pip install streamlit-plotly-events`")
+            st.info("Install streamlit-plotly-events for click support: pip install streamlit-plotly-events")
 
         prev_qty = 0
         prev_locid = ""
@@ -294,7 +295,7 @@ def declare_logic(barcode, reset_callback):
             options=all_locids,
             index=all_locids.index(prev_locid) if prev_locid in all_locids else 0 if all_locids else 0,
             key="declare_locid",
-            help="Type or pick from the list. Press Enter to confirm your choice."
+            help="Type or pick from the filtered list. Press Enter to confirm your choice."
         ) if all_locids else st.text_input("Shelf Location (locid)", key="declare_locid", max_chars=32)
 
         st.info(f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
@@ -382,7 +383,7 @@ with tab1:
             st.success(f"Scanned: {barcode}")
         declare_logic(barcode, reset_camera_scan)
     else:
-        st.warning("Camera scanning not available. Please use tab 2 or `pip install streamlit-qrcode-scanner`.")
+        st.warning("Camera scanning not available. Please use tab 2 or pip install streamlit-qrcode-scanner.")
 
 with tab2:
     barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
