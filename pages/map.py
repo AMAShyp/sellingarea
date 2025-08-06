@@ -60,40 +60,15 @@ def color_for_idx(idx):
 def map_with_clusters(locs, clusters):
     import math
     shapes = []
-    cluster_labels_x = []
-    cluster_labels_y = []
-    cluster_labels_text = []
     min_x = min_y = float("inf")
     max_x = max_y = float("-inf")
     cluster_map = {}
     color_map = {}
-    cluster_centroids = {}
     for ci, clist in enumerate(clusters):
         rgba, hexcol = color_for_idx(ci)
         for idx in clist:
             cluster_map[idx] = ci
             color_map[ci] = (rgba, hexcol)
-        # Centroid calculation for the cluster (average center of its shelves)
-        cx_all, cy_all = [], []
-        for idx in clist:
-            x, y, w, h = map(to_float, (locs[idx]["x_pct"], locs[idx]["y_pct"], locs[idx]["w_pct"], locs[idx]["h_pct"]))
-            deg = float(locs[idx].get("rotation_deg") or 0)
-            if deg == 0:
-                cx = x + w/2
-                cy = 1 - (y + h/2)
-            else:
-                # For rotated, use center before rotation (approximate)
-                cx = x + w/2
-                cy = 1 - (y + h/2)
-            cx_all.append(cx)
-            cy_all.append(cy)
-        centroid_x = sum(cx_all) / len(cx_all)
-        centroid_y = sum(cy_all) / len(cy_all)
-        cluster_centroids[ci] = (centroid_x, centroid_y)
-        cluster_labels_x.append(centroid_x)
-        cluster_labels_y.append(centroid_y)
-        cluster_labels_text.append(color_map[ci][1])
-
     for idx, row in enumerate(locs):
         x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
@@ -124,19 +99,46 @@ def map_with_clusters(locs, clusters):
     expand_y = (max_y - min_y) * 0.07
     fig.update_xaxes(visible=False, range=[min_x - expand_x, max_x + expand_x], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[min_y - expand_y, max_y + expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
-    # Add cluster color codes as map annotations
-    fig.add_scatter(
-        x=cluster_labels_x,
-        y=cluster_labels_y,
-        text=cluster_labels_text,
-        mode="text",
-        textposition="middle center",
-        textfont=dict(size=18, color="#19375a", family="monospace"),
-        showlegend=False,
-        hoverinfo="none",
-        name="Cluster Color Code"
-    )
     return fig, color_map
+
+def map_for_cluster(cluster, shelf_locs, color, hexcol):
+    import math
+    shapes = []
+    min_x = min_y = float("inf")
+    max_x = max_y = float("-inf")
+    # Only the shelves in this cluster, colored
+    for idx in cluster:
+        row = shelf_locs[idx]
+        x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
+        deg = float(row.get("rotation_deg") or 0)
+        cx, cy = x + w/2, 1 - (y + h/2)
+        y_draw = 1 - y - h
+        min_x = min(min_x, x)
+        min_y = min(min_y, y_draw)
+        max_x = max(max_x, x + w)
+        max_y = max(max_y, y_draw + h)
+        fill = color
+        line = dict(width=1.5, color=hexcol)
+        if deg == 0:
+            shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
+        else:
+            rad = math.radians(deg)
+            cos, sin = math.cos(rad), math.sin(rad)
+            pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
+            abs_pts = [(cx + u * cos - v * sin, cy + u * sin + v * cos) for u, v in pts]
+            min_x = min([min_x] + [p[0] for p in abs_pts])
+            min_y = min([min_y] + [p[1] for p in abs_pts])
+            max_x = max([max_x] + [p[0] for p in abs_pts])
+            max_y = max([max_y] + [p[1] for p in abs_pts])
+            path = "M " + " L ".join(f"{x_},{y_}" for x_, y_ in abs_pts) + " Z"
+            shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
+    fig = go.Figure()
+    fig.update_layout(shapes=shapes, height=230, margin=dict(l=8, r=8, t=8, b=8), plot_bgcolor="#f8f9fa")
+    expand_x = (max_x - min_x) * 0.08
+    expand_y = (max_y - min_y) * 0.08
+    fig.update_xaxes(visible=False, range=[min_x - expand_x, max_x + expand_x], constrain="domain", fixedrange=True)
+    fig.update_yaxes(visible=False, range=[min_y - expand_y, max_y + expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
+    return fig
 
 st.set_page_config(layout="centered")
 st.title("🗺️ Shelf Map")
@@ -149,13 +151,17 @@ fig, color_map = map_with_clusters(shelf_locs, clusters)
 st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("---")
-st.markdown("### 🟦 Cluster Details")
+st.markdown("### 🟦 Cluster Details (clusters with ≥ 15 shelves)")
+
 for i, cluster in enumerate(clusters):
+    if len(cluster) < 15:
+        continue
     rgba, hexcol = color_for_idx(i)
     st.markdown(
         f"<div style='display:inline-block;width:1.5em;height:1.5em;background:{hexcol};border-radius:4px;margin-right:0.5em;vertical-align:middle;'></div>"
-        f"<b>Cluster {i+1}</b> <span style='color:{hexcol};font-size:0.98em;'>{hexcol}</span>",
+        f"<b>Cluster {i+1}</b> <span style='color:{hexcol};font-size:0.98em;'>{hexcol}</span> <span style='color:#888;font-size:0.96em'>(count: {len(cluster)})</span>",
         unsafe_allow_html=True
     )
     locids = [shelf_locs[idx]['locid'] for idx in cluster]
     st.table({"locid": [str(locid) for locid in locids]})
+    st.plotly_chart(map_for_cluster(cluster, shelf_locs, rgba, hexcol), use_container_width=True)
