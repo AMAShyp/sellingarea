@@ -2,17 +2,62 @@ import streamlit as st
 import plotly.graph_objects as go
 from shelf_map.shelf_map_handler import ShelfMapHandler
 
-def map_with_textlabels(locs):
+def shelves_are_adjacent(a, b, tol=1e-5):
+    # a, b: shelf dicts with x, y, w, h, rotation_deg (assume deg=0 for adjacency)
+    # If you use rotated rectangles, you need a more advanced collision test!
+    ax1, ay1 = a['x_pct'], a['y_pct']
+    ax2, ay2 = ax1 + a['w_pct'], ay1 + a['h_pct']
+    bx1, by1 = b['x_pct'], b['y_pct']
+    bx2, by2 = bx1 + b['w_pct'], by1 + b['h_pct']
+    # Test for rectangle touching or overlapping
+    return not (ax2 < bx1 - tol or bx2 < ax1 - tol or ay2 < by1 - tol or by2 < ay1 - tol)
+
+def build_clusters(locs):
+    # Build clusters of adjacent shelves (connected components)
+    n = len(locs)
+    visited = [False]*n
+    clusters = []
+    for i in range(n):
+        if not visited[i]:
+            # BFS
+            cluster = []
+            queue = [i]
+            visited[i] = True
+            while queue:
+                curr = queue.pop(0)
+                cluster.append(curr)
+                for j in range(n):
+                    if not visited[j] and shelves_are_adjacent(locs[curr], locs[j]):
+                        visited[j] = True
+                        queue.append(j)
+            clusters.append(cluster)
+    return clusters
+
+def color_for_idx(idx):
+    # Cycle through some visible, neutral colors (add more if many clusters)
+    COLORS = [
+        "rgba(220,53,69,0.29)",
+        "rgba(2,117,216,0.22)",
+        "rgba(92,184,92,0.21)",
+        "rgba(240,173,78,0.19)",
+        "rgba(155,89,182,0.19)",
+        "rgba(51,51,51,0.14)"
+    ]
+    return COLORS[idx % len(COLORS)]
+
+def map_with_clusters(locs, clusters=None):
     import math
     shapes = []
-    label_x = []
-    label_y = []
-    label_text = []
+    label_x, label_y, label_text = [], [], []
     min_x = min_y = float("inf")
     max_x = max_y = float("-inf")
-    any_loc = False
+    cluster_map = {}
+    if clusters:
+        for ci, clist in enumerate(clusters):
+            for idx in clist:
+                cluster_map[idx] = ci
 
-    for row in locs:
+    for idx, row in enumerate(locs):
         x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
         cx, cy = x + w/2, 1 - (y + h/2)
@@ -21,10 +66,8 @@ def map_with_textlabels(locs):
         min_y = min(min_y, y_draw)
         max_x = max(max_x, x + w)
         max_y = max(max_y, y_draw + h)
-        any_loc = True
-        fill = "rgba(180,180,180,0.13)"
+        fill = color_for_idx(cluster_map[idx]) if clusters else "rgba(180,180,180,0.11)"
         line = dict(width=1.2, color="#888")
-
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
         else:
@@ -38,21 +81,16 @@ def map_with_textlabels(locs):
             max_y = max([max_y] + [p[1] for p in abs_pts])
             path = "M " + " L ".join(f"{x_},{y_}" for x_, y_ in abs_pts) + " Z"
             shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
-
         label_x.append(cx)
         label_y.append(cy)
         label_text.append(row.get("label", row["locid"]))
 
     fig = go.Figure()
-    fig.update_layout(shapes=shapes, height=460, margin=dict(l=12, r=12, t=10, b=5), plot_bgcolor="#f8f9fa")
-    if any_loc:
-        expand_x = (max_x - min_x) * 0.07
-        expand_y = (max_y - min_y) * 0.07
-        fig.update_xaxes(visible=False, range=[min_x - expand_x, max_x + expand_x], constrain="domain", fixedrange=True)
-        fig.update_yaxes(visible=False, range=[min_y - expand_y, max_y + expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
-    else:
-        fig.update_xaxes(visible=False, range=[0, 1], constrain="domain", fixedrange=True)
-        fig.update_yaxes(visible=False, range=[0, 1], scaleanchor="x", scaleratio=1, fixedrange=True)
+    fig.update_layout(shapes=shapes, height=460, margin=dict(l=12,r=12,t=10,b=5), plot_bgcolor="#f8f9fa")
+    expand_x = (max_x - min_x) * 0.07
+    expand_y = (max_y - min_y) * 0.07
+    fig.update_xaxes(visible=False, range=[min_x-expand_x, max_x+expand_x], constrain="domain", fixedrange=True)
+    fig.update_yaxes(visible=False, range=[min_y-expand_y, max_y+expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
     fig.add_scatter(
         x=label_x, y=label_y, text=label_text,
         mode="text",
@@ -70,5 +108,13 @@ st.title("🗺️ Shelf Map")
 map_handler = ShelfMapHandler()
 shelf_locs = map_handler.get_locations()
 
-fig = map_with_textlabels(shelf_locs)
+cluster_mode = st.checkbox("Show shelf clusters (by physical neighborhood/alignment)", value=False)
+
+if cluster_mode:
+    clusters = build_clusters(shelf_locs)
+    fig = map_with_clusters(shelf_locs, clusters)
+    st.info(f"Detected {len(clusters)} shelf clusters (connected shelf groups) on map.")
+else:
+    fig = map_with_clusters(shelf_locs, None)
+
 st.plotly_chart(fig, use_container_width=True)
