@@ -151,7 +151,7 @@ def map_for_cluster(cluster, shelf_locs, color, hexcol):
             shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
         label = str(row.get('locid', idx))
         fontsize = fit_fontsize_for_shelf(w, h, label)
-        lx, ly = offset_label(x, y, w, h, deg, offset_frac=0.37)
+        lx, ly = offset_label(x, y, w, h, deg, offset_frac=1)
         labels_x.append(lx)
         labels_y.append(ly)
         labels_text.append(label)
