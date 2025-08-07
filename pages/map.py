@@ -200,7 +200,7 @@ for i, cluster in enumerate(clusters):
     rgba, hexcol = color_for_idx(i)
     st.markdown(
         f"<div style='display:inline-block;width:1.5em;height:1.5em;background:{hexcol};border-radius:4px;margin-right:0.5em;vertical-align:middle;'></div>"
-        f"<b>Cluster {i+1}</b> <span style='color:{hexcol};font-size:0.98em;'>{hexcol}</span> <span style='color:#888;font-size:0.96em'>(count: {len(cluster)})</span>",
+        f"<b>Cluster {i+1}</b> <span style='color:{hexcol};font-size:2em;'>{hexcol}</span> <span style='color:#888;font-size:2em'>(count: {len(cluster)})</span>",
         unsafe_allow_html=True
     )
     locids = [shelf_locs[idx]['locid'] for idx in cluster]
