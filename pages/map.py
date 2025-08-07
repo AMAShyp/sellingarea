@@ -95,7 +95,7 @@ def fit_fontsize_for_shelf(w, h, text, base_size=14, min_size=8, max_size=20):
     norm_area = shelf_area / (0.10 * 0.06) # normalized
     font_size = base_size * (norm_area ** 0.35)
     if len(text) > 7:
-        font_size *= 0.82
+        font_size *= 2
     return int(max(min(font_size, max_size), min_size))
 
 def offset_label(x, y, w, h, deg=0, offset_frac=0.32):
