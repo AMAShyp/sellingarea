@@ -71,6 +71,7 @@ def map_with_clusters(locs, clusters):
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
         else:
+            import math
             rad = math.radians(deg)
             cos, sin = math.cos(rad), math.sin(rad)
             pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
@@ -91,13 +92,29 @@ def map_with_clusters(locs, clusters):
 
 def fit_fontsize_for_shelf(w, h, text, base_size=14, min_size=8, max_size=20):
     shelf_area = max(w * h, 1e-7)
-    norm_area = shelf_area / (0.10 * 0.06)
+    norm_area = shelf_area / (0.10 * 0.06) # normalized
     font_size = base_size * (norm_area ** 0.35)
     if len(text) > 7:
         font_size *= 0.82
     return int(max(min(font_size, max_size), min_size))
 
-def map_for_cluster(cluster, shelf_locs, color, hexcol, show_labels=True):
+def offset_label(x, y, w, h, deg=0, offset_frac=0.32):
+    """
+    Offset label to outside top-right of the shelf (offset_frac: as proportion of diagonal)
+    Works for both rotated and non-rotated shelves.
+    """
+    import math
+    cx = x + w/2
+    cy = 1 - (y + h/2)
+    # Offset direction: 45° (top right) relative to the rectangle orientation
+    angle = math.radians(deg + 45)
+    # Diagonal length for proportional offset
+    diag = (w**2 + h**2) ** 0.5
+    dx = math.cos(angle) * diag * offset_frac
+    dy = math.sin(angle) * diag * offset_frac
+    return cx + dx, cy + dy
+
+def map_for_cluster(cluster, shelf_locs, color, hexcol):
     import math
     shapes = []
     labels_x = []
@@ -106,7 +123,6 @@ def map_for_cluster(cluster, shelf_locs, color, hexcol, show_labels=True):
     labels_size = []
     min_x = min_y = float("inf")
     max_x = max_y = float("-inf")
-
     for idx in cluster:
         row = shelf_locs[idx]
         x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
@@ -122,8 +138,6 @@ def map_for_cluster(cluster, shelf_locs, color, hexcol, show_labels=True):
         line = dict(width=1.5, color=hexcol)
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
-            label_x = x + w/2
-            label_y = y_draw + h/2
         else:
             rad = math.radians(deg)
             cos, sin = math.cos(rad), math.sin(rad)
@@ -135,15 +149,13 @@ def map_for_cluster(cluster, shelf_locs, color, hexcol, show_labels=True):
             max_y = max([max_y] + [p[1] for p in abs_pts])
             path = "M " + " L ".join(f"{x_},{y_}" for x_, y_ in abs_pts) + " Z"
             shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
-            label_x = cx
-            label_y = cy
         label = str(row.get('locid', idx))
         fontsize = fit_fontsize_for_shelf(w, h, label)
-        labels_x.append(label_x)
-        labels_y.append(label_y)
+        lx, ly = offset_label(x, y, w, h, deg, offset_frac=0.37)
+        labels_x.append(lx)
+        labels_y.append(ly)
         labels_text.append(label)
         labels_size.append(fontsize)
-
     fig = go.Figure()
     fig.update_layout(
         shapes=shapes,
@@ -151,23 +163,20 @@ def map_for_cluster(cluster, shelf_locs, color, hexcol, show_labels=True):
         margin=dict(l=8, r=8, t=8, b=8),
         plot_bgcolor="#f8f9fa"
     )
-    expand_x = (max_x - min_x) * 0.08
-    expand_y = (max_y - min_y) * 0.08
+    expand_x = (max_x - min_x) * 0.14
+    expand_y = (max_y - min_y) * 0.14
     fig.update_xaxes(visible=False, range=[min_x - expand_x, max_x + expand_x], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[min_y - expand_y, max_y + expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
-    # Show labels only if requested
-    if show_labels:
-        for x, y, txt, size in zip(labels_x, labels_y, labels_text, labels_size):
-            fig.add_trace(go.Scatter(
-                x=[x],
-                y=[y],
-                mode='text',
-                text=[txt],
-                textfont=dict(color=hexcol, size=size, family='monospace'),
-                textposition="middle center",
-                hoverinfo="text+name",
-                showlegend=False
-            ))
+    for x, y, txt, size in zip(labels_x, labels_y, labels_text, labels_size):
+        fig.add_trace(go.Scatter(
+            x=[x], y=[y],
+            mode='text',
+            text=[txt],
+            textfont=dict(color=hexcol, size=size, family='monospace'),
+            textposition="middle center",
+            hoverinfo="text+name",
+            showlegend=False
+        ))
     return fig
 
 # ---- STREAMLIT APP ----
@@ -181,8 +190,6 @@ shelf_locs = map_handler.get_locations()
 clusters = build_clusters(shelf_locs)
 fig, color_map = map_with_clusters(shelf_locs, clusters)
 st.plotly_chart(fig, use_container_width=True)
-
-show_labels = st.checkbox("Show shelf labels", value=True, help="Toggle to show or hide shelf IDs in the cluster maps.")
 
 st.markdown("---")
 st.markdown("### 🟦 Cluster Details (clusters with ≥ 15 shelves)")
@@ -198,4 +205,4 @@ for i, cluster in enumerate(clusters):
     )
     locids = [shelf_locs[idx]['locid'] for idx in cluster]
     st.table({"locid": [str(locid) for locid in locids]})
-    st.plotly_chart(map_for_cluster(cluster, shelf_locs, rgba, hexcol, show_labels=show_labels), use_container_width=True)
+    st.plotly_chart(map_for_cluster(cluster, shelf_locs, rgba, hexcol), use_container_width=True)
