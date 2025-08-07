@@ -90,18 +90,14 @@ def map_with_clusters(locs, clusters):
     return fig, color_map
 
 def fit_fontsize_for_shelf(w, h, text, base_size=14, min_size=8, max_size=20):
-    # Simple logic: smaller shelves get smaller font.
-    # base_size (px) for a typical width=0.10, height=0.06 shelf, scale from there
     shelf_area = max(w * h, 1e-7)
-    norm_area = shelf_area / (0.10 * 0.06) # normalize to "typical" shelf area
-    # Very rough: size increases with area, but capped
+    norm_area = shelf_area / (0.10 * 0.06)
     font_size = base_size * (norm_area ** 0.35)
-    # If label is long, shrink font a bit more
     if len(text) > 7:
         font_size *= 0.82
     return int(max(min(font_size, max_size), min_size))
 
-def map_for_cluster(cluster, shelf_locs, color, hexcol):
+def map_for_cluster(cluster, shelf_locs, color, hexcol, show_labels=True):
     import math
     shapes = []
     labels_x = []
@@ -159,18 +155,19 @@ def map_for_cluster(cluster, shelf_locs, color, hexcol):
     expand_y = (max_y - min_y) * 0.08
     fig.update_xaxes(visible=False, range=[min_x - expand_x, max_x + expand_x], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[min_y - expand_y, max_y + expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
-    # Add text labels at shelf centers, with calculated font size
-    for x, y, txt, size in zip(labels_x, labels_y, labels_text, labels_size):
-        fig.add_trace(go.Scatter(
-            x=[x],
-            y=[y],
-            mode='text',
-            text=[txt],
-            textfont=dict(color=hexcol, size=size, family='monospace'),
-            textposition="middle center",
-            hoverinfo="text+name",
-            showlegend=False
-        ))
+    # Show labels only if requested
+    if show_labels:
+        for x, y, txt, size in zip(labels_x, labels_y, labels_text, labels_size):
+            fig.add_trace(go.Scatter(
+                x=[x],
+                y=[y],
+                mode='text',
+                text=[txt],
+                textfont=dict(color=hexcol, size=size, family='monospace'),
+                textposition="middle center",
+                hoverinfo="text+name",
+                showlegend=False
+            ))
     return fig
 
 # ---- STREAMLIT APP ----
@@ -184,6 +181,8 @@ shelf_locs = map_handler.get_locations()
 clusters = build_clusters(shelf_locs)
 fig, color_map = map_with_clusters(shelf_locs, clusters)
 st.plotly_chart(fig, use_container_width=True)
+
+show_labels = st.checkbox("Show shelf labels", value=True, help="Toggle to show or hide shelf IDs in the cluster maps.")
 
 st.markdown("---")
 st.markdown("### 🟦 Cluster Details (clusters with ≥ 15 shelves)")
@@ -199,4 +198,4 @@ for i, cluster in enumerate(clusters):
     )
     locids = [shelf_locs[idx]['locid'] for idx in cluster]
     st.table({"locid": [str(locid) for locid in locids]})
-    st.plotly_chart(map_for_cluster(cluster, shelf_locs, rgba, hexcol), use_container_width=True)
+    st.plotly_chart(map_for_cluster(cluster, shelf_locs, rgba, hexcol, show_labels=show_labels), use_container_width=True)
