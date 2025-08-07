@@ -98,7 +98,7 @@ def fit_fontsize_for_shelf(w, h, text, base_size=14, min_size=8, max_size=20):
         font_size *= 2
     return int(max(min(font_size, max_size), min_size))
 
-def offset_label(x, y, w, h, deg=0, offset_frac=0.32):
+def offset_label(x, y, w, h, deg=0, offset_frac=1):
     """
     Offset label to outside top-right of the shelf (offset_frac: as proportion of diagonal)
     Works for both rotated and non-rotated shelves.
