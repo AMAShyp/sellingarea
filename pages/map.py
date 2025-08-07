@@ -42,39 +42,26 @@ def color_for_idx(idx):
         "#FFD700", "#E67E22", "#C0392B", "#16A085", "#7B241C", "#1ABC9C",
     ]
     hexcol = COLORS[idx % len(COLORS)]
-    # Convert HEX to RGB for pydeck
     rgb = tuple(int(hexcol[i:i+2], 16) for i in (1, 3, 5))
     return rgb, hexcol
 
 def make_rectangle(x, y, w, h, deg):
-    """
-    Returns the four corners of a rectangle (counterclockwise)
-    given its top-left x, y, width, height, and rotation (deg).
-    All values in normalized (0–1) floor units.
-    Note: Deck.gl expects [lng, lat] so x is lon, y is lat.
-    """
     cx = x + w / 2
     cy = y + h / 2
     rad = np.deg2rad(deg)
     cos, sin = np.cos(rad), np.sin(rad)
-    # Rectangle corners relative to center (counterclockwise from top-left)
     corners = np.array([
         [-w/2, -h/2],
         [ w/2, -h/2],
         [ w/2,  h/2],
         [-w/2,  h/2]
     ])
-    # Apply rotation
     rotated = np.dot(corners, np.array([[cos, -sin],[sin, cos]]))
-    # Shift to absolute center
     abs_pts = rotated + [cx, cy]
-    # pydeck wants [lng, lat] (so: x, y)
-    return abs_pts.tolist()
+    return abs_pts.tolist() + [abs_pts[0].tolist()]  # close polygon
 
 def shelf_map_pydeck(shelf_locs, clusters):
-    # Build polygons and labels for all shelves, color by cluster
     polygons = []
-    labels = []
     cluster_map = {}
     color_map = {}
     for ci, clist in enumerate(clusters):
@@ -86,30 +73,17 @@ def shelf_map_pydeck(shelf_locs, clusters):
         x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
         coords = make_rectangle(x, y, w, h, deg)
-        # Deck.gl: must close the polygon (repeat the first point at the end)
-        coords.append(coords[0])
         ci = cluster_map[idx]
         rgb = color_map[ci][0]
         label = str(row.get('label') or row.get('locid') or idx)
-        # Polygon for shelf
         polygons.append({
             "polygon": coords,
             "label": label,
             "locid": row.get('locid'),
-            "fill_color": list(rgb) + [150],  # semi-transparent
+            "fill_color": list(rgb) + [150],
             "line_color": list(rgb) + [255]
         })
-        # Text label: center of shelf
-        cx = x + w / 2
-        cy = y + h / 2
-        labels.append({
-            "position": [cx, cy],
-            "text": label,
-            "color": [0,0,0,255],  # black text
-        })
     poly_df = pd.DataFrame(polygons)
-    label_df = pd.DataFrame(labels)
-    # Create layers
     polygon_layer = pdk.Layer(
         "PolygonLayer",
         data=poly_df,
@@ -119,29 +93,20 @@ def shelf_map_pydeck(shelf_locs, clusters):
         pickable=True,
         auto_highlight=True,
     )
-    label_layer = pdk.Layer(
-        "TextLayer",
-        data=label_df,
-        get_position="position",
-        get_text="text",
-        get_color="color",
-        get_size=18,
-        get_alignment_baseline="'center'",
-        get_text_anchor="'middle'",
-        pickable=False,
-    )
-    # Compose deck
     view_state = pdk.ViewState(
         longitude=0.5, latitude=0.5, zoom=6, min_zoom=4, max_zoom=20, pitch=0, bearing=0,
     )
-    r = pdk.Deck(
-        layers=[polygon_layer, label_layer],
+    deck = pdk.Deck(
+        layers=[polygon_layer],
         initial_view_state=view_state,
-        map_provider=None,    # disables basemap
-        tooltip={"text": "{label}"},
+        map_provider=None,
+        tooltip={
+            "html": "<b>{label}</b>",
+            "style": {"backgroundColor": "white", "color": "#222", "fontSize": "18px", "font-family": "monospace"},
+        },
         height=550,
     )
-    return r
+    return deck
 
 # ---- STREAMLIT APP ----
 
@@ -152,7 +117,6 @@ map_handler = ShelfMapHandler()
 shelf_locs = map_handler.get_locations()
 clusters = build_clusters(shelf_locs)
 
-# Deck.gl map view:
 st.pydeck_chart(shelf_map_pydeck(shelf_locs, clusters))
 
 st.markdown("---")
