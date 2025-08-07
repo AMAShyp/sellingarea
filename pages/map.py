@@ -36,20 +36,8 @@ def build_clusters(locs):
 
 def color_for_idx(idx):
     COLORS = [
-        "#dc3545",  # red
-        "#0275d8",  # blue
-        "#5cb85c",  # green
-        "#f0ad4e",  # orange
-        "#9b59b6",  # purple
-        "#333333",  # gray/black
-        "#800080",  # violet
-        "#008080",  # teal
-        "#FFD700",  # gold
-        "#E67E22",  # carrot
-        "#C0392B",  # dark red
-        "#16A085",  # dark teal
-        "#7B241C",  # brown red
-        "#1ABC9C",  # turquoise
+        "#dc3545", "#0275d8", "#5cb85c", "#f0ad4e", "#9b59b6", "#333333", "#800080", "#008080",
+        "#FFD700", "#E67E22", "#C0392B", "#16A085", "#7B241C", "#1ABC9C",
     ]
     hexcol = COLORS[idx % len(COLORS)]
     rgba = "rgba({}, {}, {}, 0.22)".format(
@@ -104,14 +92,18 @@ def map_with_clusters(locs, clusters):
 def map_for_cluster(cluster, shelf_locs, color, hexcol):
     import math
     shapes = []
+    labels_x = []
+    labels_y = []
+    labels_text = []
     min_x = min_y = float("inf")
     max_x = max_y = float("-inf")
-    # Only the shelves in this cluster, colored
+    # Draw shelves with labels
     for idx in cluster:
         row = shelf_locs[idx]
         x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
-        cx, cy = x + w/2, 1 - (y + h/2)
+        cx = x + w/2
+        cy = 1 - (y + h/2)
         y_draw = 1 - y - h
         min_x = min(min_x, x)
         min_y = min(min_y, y_draw)
@@ -121,6 +113,9 @@ def map_for_cluster(cluster, shelf_locs, color, hexcol):
         line = dict(width=1.5, color=hexcol)
         if deg == 0:
             shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
+            # Center label
+            labels_x.append(x + w/2)
+            labels_y.append(y_draw + h/2)
         else:
             rad = math.radians(deg)
             cos, sin = math.cos(rad), math.sin(rad)
@@ -132,13 +127,35 @@ def map_for_cluster(cluster, shelf_locs, color, hexcol):
             max_y = max([max_y] + [p[1] for p in abs_pts])
             path = "M " + " L ".join(f"{x_},{y_}" for x_, y_ in abs_pts) + " Z"
             shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
+            # Center of rotated rectangle
+            labels_x.append(cx)
+            labels_y.append(cy)
+        labels_text.append(str(row.get('locid', idx)))
     fig = go.Figure()
-    fig.update_layout(shapes=shapes, height=230, margin=dict(l=8, r=8, t=8, b=8), plot_bgcolor="#f8f9fa")
+    fig.update_layout(
+        shapes=shapes,
+        height=230,
+        margin=dict(l=8, r=8, t=8, b=8),
+        plot_bgcolor="#f8f9fa"
+    )
     expand_x = (max_x - min_x) * 0.08
     expand_y = (max_y - min_y) * 0.08
     fig.update_xaxes(visible=False, range=[min_x - expand_x, max_x + expand_x], constrain="domain", fixedrange=True)
     fig.update_yaxes(visible=False, range=[min_y - expand_y, max_y + expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
+    # Add text labels at shelf centers
+    fig.add_trace(go.Scatter(
+        x=labels_x,
+        y=labels_y,
+        mode='text',
+        text=labels_text,
+        textfont=dict(color=hexcol, size=14, family='monospace'),
+        textposition="middle center",
+        hoverinfo="text+name",
+        showlegend=False
+    ))
     return fig
+
+# ---- STREAMLIT APP ----
 
 st.set_page_config(layout="centered")
 st.title("🗺️ Shelf Map")
