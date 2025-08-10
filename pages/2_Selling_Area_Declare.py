@@ -1,8 +1,9 @@
-# streamlit_app_pydeck_declare_fullmap.py
+# streamlit_app_pydeck_declare_fullmap_clickselect.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 import pydeck as pdk
+import urllib.parse
 
 from db_handler import DatabaseManager
 from shelf_map.shelf_map_handler import ShelfMapHandler
@@ -16,7 +17,7 @@ except ImportError:
 
 # ---------------- CONFIG ----------------
 st.set_page_config(layout="centered")
-st.title("🟢 Declare Selling Area Quantity (by Barcode) — Pydeck (Full Map)")
+st.title("🟢 Declare Selling Area Quantity (by Barcode) — Tap shelf on map to select")
 
 # ---------------- GEOMETRY HELPERS ----------------
 def to_float(x):
@@ -27,9 +28,9 @@ def to_float(x):
 
 def make_rectangle(x, y, w, h, deg):
     """Return a closed polygon ([lon, lat] list) in normalized 0..1 space with rotation."""
-    cx = x + w / 2
-    cy = y + h / 2
-    rad = np.deg2rad(deg)
+    cx = x + w / 2.0
+    cy = y + h / 2.0
+    rad = np.deg2rad(float(deg or 0.0))
     cos, sin = np.cos(rad), np.sin(rad)
     corners = np.array([
         [-w/2, -h/2],
@@ -37,18 +38,23 @@ def make_rectangle(x, y, w, h, deg):
         [ w/2,  h/2],
         [-w/2,  h/2]
     ])
-    rotated = np.dot(corners, np.array([[cos, -sin],[sin, cos]]))
+    rotated = corners @ np.array([[cos, -sin],[sin, cos]])
     abs_pts = rotated + [cx, cy]
-    return abs_pts.tolist() + [abs_pts[0].tolist()]  # close polygon
+    poly = abs_pts.tolist()
+    poly.append(poly[0])  # close polygon
+    return poly
 
 def build_deck(shelf_locs, highlight_locs):
-    """Create a pydeck.Deck showing all shelves; highlight those in highlight_locs."""
+    """
+    Create a pydeck.Deck showing all shelves; highlight those in highlight_locs.
+    Tooltip includes a 'Select' link that sets ?picked=<locid> to choose the location.
+    """
     highlight_set = set(map(str, highlight_locs))
     rows = []
     for row in shelf_locs:
         locid = str(row.get("locid"))
         x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
-        deg = float(row.get("rotation_deg") or 0)
+        deg = to_float(row.get("rotation_deg") or 0)
         coords = make_rectangle(x, y, w, h, deg)
 
         is_hi = locid in highlight_set
@@ -58,10 +64,14 @@ def build_deck(shelf_locs, highlight_locs):
         line_a = 255
 
         label = str(row.get("label") or locid)
+        # Build a safe "Select" URL to set the query param ?picked=<locid>
+        select_url = "?picked=" + urllib.parse.quote_plus(locid)
+
         rows.append({
             "polygon": coords,
             "label": label,
             "locid": locid,
+            "select_url": select_url,
             "fill_color": list(fill_rgb) + [fill_a],
             "line_color": list(line_rgb) + [line_a],
         })
@@ -85,12 +95,13 @@ def build_deck(shelf_locs, highlight_locs):
     return pdk.Deck(
         layers=[polygon_layer],
         initial_view_state=view_state,
-        map_provider=None,   # coordinates are normalized (0..1)
+        map_provider=None,   # normalized coordinates (0..1), no basemap
         tooltip={
-            "html": "<b>{label}</b><br/><span style='font-family:monospace'>{locid}</span>",
-            "style": {"backgroundColor": "white", "color": "#222", "fontSize": "16px", "font-family": "monospace"},
+            # Single-line label + a Select link; tap link to choose location
+            "html": "<b>{label}</b><br/><a href='{select_url}' style='color:#0b60ff;text-decoration:none;font-weight:600'>Select</a>",
+            "style": {"backgroundColor": "white", "color": "#222", "fontSize": "15px", "font-family": "monospace"},
         },
-        height=550,
+        height=560,
     )
 
 # ---------------- DATA ACCESS ----------------
@@ -169,7 +180,7 @@ class DeclareHandler(DatabaseManager):
                 """, (int(itemid), locid))
 
     def get_all_locids_from_map(self, shelf_locs):
-        """Prefer the map’s source of truth."""
+        """Still handy as a fallback."""
         return sorted({str(r.get("locid")) for r in shelf_locs if r.get("locid") is not None})
 
     def get_items_at_location(self, locid):
@@ -192,23 +203,38 @@ st.markdown("""
 .cat-family {color:#FF8800;font-weight:bold;}
 .cat-val {color:#111;}
 .scan-hint {
-    font-size: 1.28em;
+    font-size: 1.1em;
     color: #087911;
     font-weight: 600;
     background: #eafdff;
-    padding: .14em .7em .13em .7em;
+    padding: .2em .7em;
     border-radius: .45em;
-    margin: .2em 0 .5em 0;
+    margin: .4em 0 .6em 0;
     text-align:center;
 }
+.small-dim {color:#666;font-size:.92em;margin-top:.25rem;}
 </style>
 """, unsafe_allow_html=True)
 
 # ---------------- STATE ----------------
-if "latest_declaration" not in st.session_state:
-    st.session_state["latest_declaration"] = {}
-if "latest_itemid" not in st.session_state:
-    st.session_state["latest_itemid"] = None
+st.session_state.setdefault("latest_declaration", {})
+st.session_state.setdefault("latest_itemid", None)
+
+# read current selection from URL (?picked=LOCID)
+# Streamlit ≥1.31: st.query_params; older: st.experimental_get_query_params
+try:
+    params = st.query_params  # type: ignore[attr-defined]
+except Exception:
+    params = st.experimental_get_query_params()
+
+picked_locid = ""
+if params and "picked" in params:
+    val = params["picked"]
+    # st.query_params returns str or list depending on version; normalize
+    if isinstance(val, list):
+        picked_locid = val[0]
+    else:
+        picked_locid = val
 
 handler = DeclareHandler()
 map_handler = ShelfMapHandler()
@@ -219,14 +245,12 @@ tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 def declare_logic(barcode, reset_callback):
     item = None
     itemid = None
-
     if barcode:
         item = handler.get_item_by_barcode(barcode)
         if item is not None:
             itemid = int(item['itemid'])
 
-    # Item changed → reset last message
-    if itemid is not None and st.session_state.get("latest_itemid") != itemid:
+    if itemid and st.session_state["latest_itemid"] != itemid:
         st.session_state["latest_declaration"] = {}
         st.session_state["latest_itemid"] = itemid
 
@@ -253,29 +277,42 @@ def declare_logic(barcode, reset_callback):
 
         # Build map (highlight shelves that have this item)
         highlight_locs = shelf_entries["locid"].tolist() if not shelf_entries.empty else []
-        st.markdown("#### 🗺️ Shelf Map (pydeck) — hover any cell to see label/ID")
+        st.markdown("#### 🗺️ Shelf Map (pydeck) — tap a shelf, then press “Select” in tooltip")
+        st.caption("Tip: If you’re on mobile, tap once to show the tooltip, then tap **Select**.")
         st.pydeck_chart(build_deck(shelf_locs, highlight_locs), use_container_width=True)
 
         # Previous qty + default locid suggestion
         prev_qty = 0
         prev_locid = ""
-        if shelf_entries.empty:
-            st.warning("No previous quantity declared for this item in the selling area.")
-        else:
+        if not shelf_entries.empty:
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries) == 1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries) == 1 else 0
+        else:
+            st.warning("No previous quantity declared for this item in the selling area.")
 
-        # Location selector (pydeck click isn’t captured by Streamlit)
-        if all_locids:
+        # Determine chosen locid:
+        # 1) If user clicked “Select” in tooltip -> picked_locid
+        # 2) Else if there is exactly one prior shelf -> use that as convenience
+        # 3) Else fall back to dropdown
+        chosen_locid = picked_locid or (prev_locid if prev_locid else "")
+
+        if chosen_locid:
+            st.success(f"Chosen shelf: **{chosen_locid}**")
+            st.markdown(
+                "<div class='small-dim'>Not the right one? "
+                "<a href='?picked='>Clear selection</a> and tap a different shelf.</div>",
+                unsafe_allow_html=True
+            )
+        else:
+            # Fallback selector (still accessible)
             locid = st.selectbox(
                 "Shelf Location (locid)",
                 options=all_locids,
                 index=all_locids.index(prev_locid) if prev_locid in all_locids else 0,
                 key="declare_locid",
-                help="Pick location. Hover the map to verify."
+                help="Pick a location if you didn’t select from the map."
             )
-        else:
-            locid = st.text_input("Shelf Location (locid)", key="declare_locid", max_chars=32)
+            chosen_locid = locid
 
         st.info(
             f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
@@ -288,31 +325,32 @@ def declare_logic(barcode, reset_callback):
         )
 
         c1, c2 = st.columns([2, 1])
-        confirm_clicked = False
-        with c1:
-            if st.button("✅ Confirm Declaration", type="primary"):
-                confirm_clicked = True
-        with c2:
-            if st.button("🔄 New Scan", type="secondary"):
-                reset_callback()
-                st.rerun()
+        confirm_clicked = c1.button("✅ Confirm Declaration", key="btn_confirm_declaration")
+        if c2.button("🔄 New Scan", key="btn_new_scan"):
+            # Clear barcode inputs and URL selection
+            reset_callback()
+            try:
+                st.query_params.clear()  # Streamlit ≥1.31
+            except Exception:
+                st.experimental_set_query_params(picked="")  # fallback
+            st.rerun()
 
         if confirm_clicked:
             diff = new_qty - prev_qty
             if diff > 0:
-                actual_subtracted = handler.subtract_inventory(itemid, diff)
-                st.success(f"Inventory reduced by {actual_subtracted}.")
+                reduced = handler.subtract_inventory(itemid, diff)
+                st.success(f"Inventory reduced by {reduced}.")
             elif diff < 0:
                 st.info("Declared quantity is less than previous; updating shelf record only (no add-back).")
 
-            handler.set_shelf_quantity(itemid, locid, new_qty)
-            st.success(f"Selling area quantity for '{item['name']}' at {locid} is now {new_qty}.")
+            handler.set_shelf_quantity(itemid, chosen_locid, new_qty)
+            st.success(f"Selling area quantity for '{item['name']}' at {chosen_locid} is now {new_qty}.")
 
             st.session_state["latest_declaration"] = {
                 "itemid": itemid,
                 "itemname": item['name'],
                 "barcode": item['barcode'],
-                "locid": locid,
+                "locid": chosen_locid,
                 "qty": new_qty
             }
             st.rerun()
@@ -358,12 +396,10 @@ def show_latest_declaration_and_items():
 
 def reset_camera_scan():
     for k in ["barcode_cam", "barcode_input", "declare_qty", "declare_locid"]:
-        if k in st.session_state:
-            st.session_state.pop(k)
+        st.session_state.pop(k, None)
 
 # ---------------- TABS ----------------
 with tab1:
-    barcode = ""
     if QR_AVAILABLE:
         st.markdown(
             "<div class='scan-hint'>Aim the barcode at your phone or webcam for instant detection.<br>Hold steady and close to the lens.</div>",
@@ -378,6 +414,6 @@ with tab1:
 
 with tab2:
     barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32)
-    declare_logic(barcode, lambda: reset_camera_scan())
+    declare_logic(barcode, reset_camera_scan)
 
 show_latest_declaration_and_items()
