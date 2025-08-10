@@ -1,4 +1,4 @@
-# streamlit_low_stock_pydeck_fullmap_nolabels.py
+# streamlit_low_stock_pydeck_red_only.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -37,32 +37,30 @@ def make_rectangle(x, y, w, h, deg):
     abs_pts = rotated + [cx, cy]
     return abs_pts.tolist() + [abs_pts[0].tolist()]  # close polygon
 
-def build_deck_highlight_only(shelf_locs, highlight_locs):
+def build_deck_red_highlight(shelf_locs, highlight_locs):
     """
     Build a pydeck.Deck:
       - All shelves drawn as polygons
-      - Shelves in highlight_locs shown in red with stronger outline
-      - No TextLayer (labels appear via tooltip on hover)
+      - Shelves in highlight_locs become red with stronger outline
+      - No text labels rendered on the map
     """
     hi = set(map(str, highlight_locs))
     rows = []
+
     for row in shelf_locs:
         locid = str(row.get("locid"))
         x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
         coords = make_rectangle(x, y, w, h, deg)
-        label = str(row.get("label") or locid)
 
         is_hi = locid in hi
-        fill_rgb = (220, 53, 69) if is_hi else (180, 180, 180)   # red-ish vs grey
+        fill_rgb = (220, 53, 69) if is_hi else (180, 180, 180)   # red vs grey
         line_rgb = (216, 0, 12) if is_hi else (120, 120, 120)
         fill_a = 190 if is_hi else 70
         line_a = 255
 
         rows.append({
             "polygon": coords,
-            "label": label,
-            "locid": locid,
             "fill_color": list(fill_rgb) + [fill_a],
             "line_color": list(line_rgb) + [line_a],
         })
@@ -75,8 +73,8 @@ def build_deck_highlight_only(shelf_locs, highlight_locs):
         get_polygon="polygon",
         get_fill_color="fill_color",
         get_line_color="line_color",
-        pickable=True,
-        auto_highlight=True,
+        pickable=False,       # no hover/click; purely visual
+        auto_highlight=False, # keep stable colors
         filled=True,
         stroked=True,
         get_line_width=2,
@@ -89,11 +87,7 @@ def build_deck_highlight_only(shelf_locs, highlight_locs):
     return pdk.Deck(
         layers=[polygon_layer],
         initial_view_state=view_state,
-        map_provider=None,  # normalized 0..1 canvas
-        tooltip={
-            "html": "<b>{label}</b><br/><span style='font-family:monospace'>{locid}</span>",
-            "style": {"backgroundColor": "white", "color": "#222", "fontSize": "14px", "font-family": "monospace"},
-        },
+        map_provider=None,   # normalized 0..1 canvas
         height=360,
     )
 
@@ -157,7 +151,7 @@ class BarcodeShelfHandler(DatabaseManager):
 
 # ---------------- PAGE SETUP ----------------
 st.set_page_config(layout="wide")
-st.title("📤 Low‑Stock Items Map (All Inventory Batches Shown) — Pydeck")
+st.title("📤 Low‑Stock Items Map (Red Highlight) — Pydeck")
 
 # ---------------- LOAD DATA ----------------
 handler = BarcodeShelfHandler()
@@ -170,7 +164,7 @@ if low_items.empty:
 
 shelf_locs = map_handler.get_locations()
 
-# Shelves to highlight: locid of the first shelf layer for each low item
+# Shelves to highlight: locid of the first shelf layer for each low-stock item
 hi_locs = sorted({
     handler.get_first_layer(r.itemid).get("locid", "")
     for r in low_items.itertuples()
@@ -178,8 +172,8 @@ hi_locs = sorted({
 })
 
 # ---------------- MAP ----------------
-st.markdown("#### 🗺️ Red = shelves to refill (hover to see label/ID)")
-deck = build_deck_highlight_only(shelf_locs, hi_locs)
+st.markdown("#### 🗺️ Red = shelves to refill")
+deck = build_deck_red_highlight(shelf_locs, hi_locs)
 st.pydeck_chart(deck, use_container_width=True)
 
 # ---------------- STYLES ----------------
