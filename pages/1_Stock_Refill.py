@@ -1,4 +1,4 @@
-# streamlit_low_stock_pydeck_fullmap.py
+# streamlit_low_stock_pydeck_fullmap_nolabels.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -37,18 +37,15 @@ def make_rectangle(x, y, w, h, deg):
     abs_pts = rotated + [cx, cy]
     return abs_pts.tolist() + [abs_pts[0].tolist()]  # close polygon
 
-def build_deck_with_highlights(shelf_locs, highlight_locs, label_offset=0.018):
+def build_deck_highlight_only(shelf_locs, highlight_locs):
     """
     Build a pydeck.Deck:
       - All shelves drawn as polygons
       - Shelves in highlight_locs shown in red with stronger outline
-      - Text labels rendered slightly above highlighted shelves
+      - No TextLayer (labels appear via tooltip on hover)
     """
     hi = set(map(str, highlight_locs))
-
-    polys = []
-    texts = []
-
+    rows = []
     for row in shelf_locs:
         locid = str(row.get("locid"))
         x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
@@ -62,7 +59,7 @@ def build_deck_with_highlights(shelf_locs, highlight_locs, label_offset=0.018):
         fill_a = 190 if is_hi else 70
         line_a = 255
 
-        polys.append({
+        rows.append({
             "polygon": coords,
             "label": label,
             "locid": locid,
@@ -70,20 +67,11 @@ def build_deck_with_highlights(shelf_locs, highlight_locs, label_offset=0.018):
             "line_color": list(line_rgb) + [line_a],
         })
 
-        if is_hi:
-            cx, cy = x + w/2, y + h/2
-            texts.append({
-                "position": [cx, cy + label_offset],
-                "text": label,
-                "locid": locid
-            })
-
-    poly_df = pd.DataFrame(polys)
-    text_df = pd.DataFrame(texts) if texts else pd.DataFrame(columns=["position","text","locid"])
+    df = pd.DataFrame(rows)
 
     polygon_layer = pdk.Layer(
         "PolygonLayer",
-        data=poly_df,
+        data=df,
         get_polygon="polygon",
         get_fill_color="fill_color",
         get_line_color="line_color",
@@ -94,25 +82,12 @@ def build_deck_with_highlights(shelf_locs, highlight_locs, label_offset=0.018):
         get_line_width=2,
     )
 
-    text_layer = pdk.Layer(
-        "TextLayer",
-        data=text_df,
-        get_position="position",
-        get_text="text",
-        get_size=14,
-        get_color=[201, 0, 0, 240],  # deep red
-        get_angle=0,
-        get_text_anchor="'middle'",
-        get_alignment_baseline="'bottom'",
-        billboard=True,
-    )
-
     view_state = pdk.ViewState(
         longitude=0.5, latitude=0.5, zoom=6, min_zoom=4, max_zoom=20, pitch=0, bearing=0
     )
 
     return pdk.Deck(
-        layers=[polygon_layer, text_layer],
+        layers=[polygon_layer],
         initial_view_state=view_state,
         map_provider=None,  # normalized 0..1 canvas
         tooltip={
@@ -195,7 +170,7 @@ if low_items.empty:
 
 shelf_locs = map_handler.get_locations()
 
-# Shelves to highlight: take the locid of the first shelf layer for each low item
+# Shelves to highlight: locid of the first shelf layer for each low item
 hi_locs = sorted({
     handler.get_first_layer(r.itemid).get("locid", "")
     for r in low_items.itertuples()
@@ -203,8 +178,8 @@ hi_locs = sorted({
 })
 
 # ---------------- MAP ----------------
-st.markdown("#### 🗺️ Red = shelves to refill; labels above each red shelf")
-deck = build_deck_with_highlights(shelf_locs, hi_locs, label_offset=0.018)
+st.markdown("#### 🗺️ Red = shelves to refill (hover to see label/ID)")
+deck = build_deck_highlight_only(shelf_locs, hi_locs)
 st.pydeck_chart(deck, use_container_width=True)
 
 # ---------------- STYLES ----------------
