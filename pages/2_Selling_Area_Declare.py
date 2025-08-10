@@ -1,4 +1,4 @@
-# streamlit_app_pydeck_declare.py
+# streamlit_app_pydeck_declare_fullmap.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -14,16 +14,11 @@ try:
 except ImportError:
     QR_AVAILABLE = False
 
-# --------- CONFIG ---------
+# ---------------- CONFIG ----------------
 st.set_page_config(layout="centered")
-st.title("🟢 Declare Selling Area Quantity (by Barcode) — Pydeck Version")
+st.title("🟢 Declare Selling Area Quantity (by Barcode) — Pydeck (Full Map)")
 
-# --- LOAD filtered locid list from CSV ---
-LOCID_CSV_PATH = "assets/locid_list.csv"
-locid_df = pd.read_csv(LOCID_CSV_PATH)
-FILTERED_LOCIDS = set(str(l).strip() for l in locid_df["locid"].dropna().unique())
-
-# --------- HELPERS (pydeck geometry) ---------
+# ---------------- GEOMETRY HELPERS ----------------
 def to_float(x):
     try:
         return float(x)
@@ -31,7 +26,7 @@ def to_float(x):
         return 0.0
 
 def make_rectangle(x, y, w, h, deg):
-    """Return a closed polygon (list of [lon, lat]) in normalized 0..1 space."""
+    """Return a closed polygon ([lon, lat] list) in normalized 0..1 space with rotation."""
     cx = x + w / 2
     cy = y + h / 2
     rad = np.deg2rad(deg)
@@ -44,36 +39,26 @@ def make_rectangle(x, y, w, h, deg):
     ])
     rotated = np.dot(corners, np.array([[cos, -sin],[sin, cos]]))
     abs_pts = rotated + [cx, cy]
-    # Deck.gl expects closed polygon (repeat first coordinate at the end)
-    return abs_pts.tolist() + [abs_pts[0].tolist()]
+    return abs_pts.tolist() + [abs_pts[0].tolist()]  # close polygon
 
-def shelf_map_pydeck_highlight(shelf_locs, highlight_locs, allowed_locids):
-    """
-    Build a pydeck.Deck where:
-      - shelves in allowed_locids are drawn
-      - shelves in highlight_locs get stronger color/outline
-      - tooltip shows label/locid
-    """
-    polygons = []
+def build_deck(shelf_locs, highlight_locs):
+    """Create a pydeck.Deck showing all shelves; highlight those in highlight_locs."""
+    highlight_set = set(map(str, highlight_locs))
+    rows = []
     for row in shelf_locs:
         locid = str(row.get("locid"))
-        if locid not in allowed_locids:
-            continue
-
         x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
         coords = make_rectangle(x, y, w, h, deg)
 
-        # visual encoding
-        is_hi = locid in set(map(str, highlight_locs))
-        fill_rgb = (220, 53, 69) if is_hi else (180, 180, 180)   # red-ish for highlight, grey otherwise
+        is_hi = locid in highlight_set
+        fill_rgb = (220, 53, 69) if is_hi else (180, 180, 180)     # red-ish vs grey
         line_rgb = (216, 0, 12) if is_hi else (120, 120, 120)
-        fill_a = 180 if is_hi else 70
+        fill_a = 190 if is_hi else 70
         line_a = 255
 
         label = str(row.get("label") or locid)
-
-        polygons.append({
+        rows.append({
             "polygon": coords,
             "label": label,
             "locid": locid,
@@ -81,8 +66,7 @@ def shelf_map_pydeck_highlight(shelf_locs, highlight_locs, allowed_locids):
             "line_color": list(line_rgb) + [line_a],
         })
 
-    df = pd.DataFrame(polygons)
-
+    df = pd.DataFrame(rows)
     polygon_layer = pdk.Layer(
         "PolygonLayer",
         data=df,
@@ -91,28 +75,25 @@ def shelf_map_pydeck_highlight(shelf_locs, highlight_locs, allowed_locids):
         get_line_color="line_color",
         pickable=True,
         auto_highlight=True,
-        stroked=True,
         filled=True,
+        stroked=True,
         get_line_width=2,
     )
-
     view_state = pdk.ViewState(
         longitude=0.5, latitude=0.5, zoom=6, min_zoom=4, max_zoom=20, pitch=0, bearing=0
     )
-
-    deck = pdk.Deck(
+    return pdk.Deck(
         layers=[polygon_layer],
         initial_view_state=view_state,
-        map_provider=None,  # no base map; coordinates are normalized
+        map_provider=None,   # coordinates are normalized (0..1)
         tooltip={
             "html": "<b>{label}</b><br/><span style='font-family:monospace'>{locid}</span>",
             "style": {"backgroundColor": "white", "color": "#222", "fontSize": "16px", "font-family": "monospace"},
         },
         height=550,
     )
-    return deck
 
-# --------- DATA ACCESS ---------
+# ---------------- DATA ACCESS ----------------
 class DeclareHandler(DatabaseManager):
     def get_item_by_barcode(self, barcode):
         df = self.fetch_data("""
@@ -133,7 +114,7 @@ class DeclareHandler(DatabaseManager):
             HAVING SUM(quantity) > 0
             ORDER BY locid
         """, (int(itemid),))
-        return df[df["locid"].isin(FILTERED_LOCIDS)] if not df.empty else df
+        return df if not df.empty else df
 
     def get_inventory_total(self, itemid):
         df = self.fetch_data("""
@@ -187,8 +168,9 @@ class DeclareHandler(DatabaseManager):
                     DELETE FROM shelf WHERE itemid=%s AND locid=%s
                 """, (int(itemid), locid))
 
-    def get_all_locids(self):
-        return sorted(FILTERED_LOCIDS)
+    def get_all_locids_from_map(self, shelf_locs):
+        """Prefer the map’s source of truth."""
+        return sorted({str(r.get("locid")) for r in shelf_locs if r.get("locid") is not None})
 
     def get_items_at_location(self, locid):
         df = self.fetch_data("""
@@ -200,7 +182,7 @@ class DeclareHandler(DatabaseManager):
         """, (locid,))
         return df if not df.empty else pd.DataFrame(columns=["itemid", "name", "barcode", "quantity"])
 
-# --------- STYLE ---------
+# ---------------- STYLE ----------------
 st.markdown("""
 <style>
 .catline {margin:0.08em 0 0.09em 0;font-size:1.1em;}
@@ -222,7 +204,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --------- STATE ---------
+# ---------------- STATE ----------------
 if "latest_declaration" not in st.session_state:
     st.session_state["latest_declaration"] = {}
 if "latest_itemid" not in st.session_state:
@@ -233,7 +215,7 @@ map_handler = ShelfMapHandler()
 
 tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 
-# --------- CORE FLOW ---------
+# ---------------- CORE FLOW ----------------
 def declare_logic(barcode, reset_callback):
     item = None
     itemid = None
@@ -243,7 +225,7 @@ def declare_logic(barcode, reset_callback):
         if item is not None:
             itemid = int(item['itemid'])
 
-    # Clear previous declaration when the item changes
+    # Item changed → reset last message
     if itemid is not None and st.session_state.get("latest_itemid") != itemid:
         st.session_state["latest_declaration"] = {}
         st.session_state["latest_itemid"] = itemid
@@ -263,20 +245,18 @@ def declare_logic(barcode, reset_callback):
             unsafe_allow_html=True
         )
 
-        # DB pulls
+        # Data pulls
         shelf_entries = handler.get_shelf_entries(itemid)
         inventory_total = handler.get_inventory_total(itemid)
-        all_locids = handler.get_all_locids()
+        shelf_locs = map_handler.get_locations()  # FULL MAP
+        all_locids = handler.get_all_locids_from_map(shelf_locs)
 
-        # Map data (only allowed locids)
-        raw_locs = [row for row in map_handler.get_locations() if str(row.get("locid")) in FILTERED_LOCIDS]
+        # Build map (highlight shelves that have this item)
         highlight_locs = shelf_entries["locid"].tolist() if not shelf_entries.empty else []
-
         st.markdown("#### 🗺️ Shelf Map (pydeck) — hover any cell to see label/ID")
-        deck = shelf_map_pydeck_highlight(raw_locs, highlight_locs, FILTERED_LOCIDS)
-        st.pydeck_chart(deck, use_container_width=True)
+        st.pydeck_chart(build_deck(shelf_locs, highlight_locs), use_container_width=True)
 
-        # Previous quantity & default locid suggestion
+        # Previous qty + default locid suggestion
         prev_qty = 0
         prev_locid = ""
         if shelf_entries.empty:
@@ -285,14 +265,14 @@ def declare_logic(barcode, reset_callback):
             prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries) == 1 else ""
             prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries) == 1 else 0
 
-        # Location selector (since pydeck clicks aren't captured in Streamlit)
+        # Location selector (pydeck click isn’t captured by Streamlit)
         if all_locids:
             locid = st.selectbox(
                 "Shelf Location (locid)",
                 options=all_locids,
                 index=all_locids.index(prev_locid) if prev_locid in all_locids else 0,
                 key="declare_locid",
-                help="Pick from the filtered list. Hover the map to verify labels."
+                help="Pick location. Hover the map to verify."
             )
         else:
             locid = st.text_input("Shelf Location (locid)", key="declare_locid", max_chars=32)
@@ -307,12 +287,12 @@ def declare_logic(barcode, reset_callback):
             min_value=0, value=prev_qty, step=1, key="declare_qty"
         )
 
-        col1, col2 = st.columns([2, 1])
+        c1, c2 = st.columns([2, 1])
         confirm_clicked = False
-        with col1:
+        with c1:
             if st.button("✅ Confirm Declaration", type="primary"):
                 confirm_clicked = True
-        with col2:
+        with c2:
             if st.button("🔄 New Scan", type="secondary"):
                 reset_callback()
                 st.rerun()
@@ -323,7 +303,7 @@ def declare_logic(barcode, reset_callback):
                 actual_subtracted = handler.subtract_inventory(itemid, diff)
                 st.success(f"Inventory reduced by {actual_subtracted}.")
             elif diff < 0:
-                st.info("Declared quantity is less than previous; only updating shelf record (no add-back to inventory).")
+                st.info("Declared quantity is less than previous; updating shelf record only (no add-back).")
 
             handler.set_shelf_quantity(itemid, locid, new_qty)
             st.success(f"Selling area quantity for '{item['name']}' at {locid} is now {new_qty}.")
@@ -335,7 +315,7 @@ def declare_logic(barcode, reset_callback):
                 "locid": locid,
                 "qty": new_qty
             }
-            st.rerun()  # instant feedback
+            st.rerun()
 
     elif barcode.strip():
         st.error("❌ Barcode not found in the item table.")
@@ -352,8 +332,7 @@ def show_latest_declaration_and_items():
                 <b>Barcode:</b> <span style='color:#222;font-family:monospace'>{latest["barcode"]}</span><br>
                 <b>Location:</b> <span style='color:#098A23'>{latest["locid"]}</span><br>
                 <b>Quantity:</b> <span style='color:#C61C1C'>{latest["qty"]}</span>
-            </div>
-            """,
+            </div>""",
             unsafe_allow_html=True
         )
 
@@ -382,7 +361,7 @@ def reset_camera_scan():
         if k in st.session_state:
             st.session_state.pop(k)
 
-# --------- TABS ---------
+# ---------------- TABS ----------------
 with tab1:
     barcode = ""
     if QR_AVAILABLE:
