@@ -1,26 +1,118 @@
+# streamlit_app_pydeck_declare.py
 import streamlit as st
 import pandas as pd
+import numpy as np
+import pydeck as pdk
+
 from db_handler import DatabaseManager
 from shelf_map.shelf_map_handler import ShelfMapHandler
-import plotly.graph_objects as go
 
+# Optional: barcode scanning (QR)
 try:
     from streamlit_qrcode_scanner import qrcode_scanner
     QR_AVAILABLE = True
 except ImportError:
     QR_AVAILABLE = False
 
-try:
-    from streamlit_plotly_events import plotly_events
-    PLOTLY_EVENTS_AVAILABLE = True
-except ImportError:
-    PLOTLY_EVENTS_AVAILABLE = False
+# --------- CONFIG ---------
+st.set_page_config(layout="centered")
+st.title("🟢 Declare Selling Area Quantity (by Barcode) — Pydeck Version")
 
 # --- LOAD filtered locid list from CSV ---
 LOCID_CSV_PATH = "assets/locid_list.csv"
 locid_df = pd.read_csv(LOCID_CSV_PATH)
 FILTERED_LOCIDS = set(str(l).strip() for l in locid_df["locid"].dropna().unique())
 
+# --------- HELPERS (pydeck geometry) ---------
+def to_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return 0.0
+
+def make_rectangle(x, y, w, h, deg):
+    """Return a closed polygon (list of [lon, lat]) in normalized 0..1 space."""
+    cx = x + w / 2
+    cy = y + h / 2
+    rad = np.deg2rad(deg)
+    cos, sin = np.cos(rad), np.sin(rad)
+    corners = np.array([
+        [-w/2, -h/2],
+        [ w/2, -h/2],
+        [ w/2,  h/2],
+        [-w/2,  h/2]
+    ])
+    rotated = np.dot(corners, np.array([[cos, -sin],[sin, cos]]))
+    abs_pts = rotated + [cx, cy]
+    # Deck.gl expects closed polygon (repeat first coordinate at the end)
+    return abs_pts.tolist() + [abs_pts[0].tolist()]
+
+def shelf_map_pydeck_highlight(shelf_locs, highlight_locs, allowed_locids):
+    """
+    Build a pydeck.Deck where:
+      - shelves in allowed_locids are drawn
+      - shelves in highlight_locs get stronger color/outline
+      - tooltip shows label/locid
+    """
+    polygons = []
+    for row in shelf_locs:
+        locid = str(row.get("locid"))
+        if locid not in allowed_locids:
+            continue
+
+        x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
+        deg = float(row.get("rotation_deg") or 0)
+        coords = make_rectangle(x, y, w, h, deg)
+
+        # visual encoding
+        is_hi = locid in set(map(str, highlight_locs))
+        fill_rgb = (220, 53, 69) if is_hi else (180, 180, 180)   # red-ish for highlight, grey otherwise
+        line_rgb = (216, 0, 12) if is_hi else (120, 120, 120)
+        fill_a = 180 if is_hi else 70
+        line_a = 255
+
+        label = str(row.get("label") or locid)
+
+        polygons.append({
+            "polygon": coords,
+            "label": label,
+            "locid": locid,
+            "fill_color": list(fill_rgb) + [fill_a],
+            "line_color": list(line_rgb) + [line_a],
+        })
+
+    df = pd.DataFrame(polygons)
+
+    polygon_layer = pdk.Layer(
+        "PolygonLayer",
+        data=df,
+        get_polygon="polygon",
+        get_fill_color="fill_color",
+        get_line_color="line_color",
+        pickable=True,
+        auto_highlight=True,
+        stroked=True,
+        filled=True,
+        get_line_width=2,
+    )
+
+    view_state = pdk.ViewState(
+        longitude=0.5, latitude=0.5, zoom=6, min_zoom=4, max_zoom=20, pitch=0, bearing=0
+    )
+
+    deck = pdk.Deck(
+        layers=[polygon_layer],
+        initial_view_state=view_state,
+        map_provider=None,  # no base map; coordinates are normalized
+        tooltip={
+            "html": "<b>{label}</b><br/><span style='font-family:monospace'>{locid}</span>",
+            "style": {"backgroundColor": "white", "color": "#222", "fontSize": "16px", "font-family": "monospace"},
+        },
+        height=550,
+    )
+    return deck
+
+# --------- DATA ACCESS ---------
 class DeclareHandler(DatabaseManager):
     def get_item_by_barcode(self, barcode):
         df = self.fetch_data("""
@@ -61,14 +153,15 @@ class DeclareHandler(DatabaseManager):
         left = qty
         for _, row in batches.iterrows():
             take = min(left, int(row['quantity']))
-            self.execute_command(
-                """
-                UPDATE inventory SET quantity=quantity-%s
-                WHERE itemid=%s AND expirationdate=%s AND cost_per_unit=%s AND quantity>=%s
-                """,
-                (take, int(itemid), row['expirationdate'], row['cost_per_unit'], take)
-            )
-            left -= take
+            if take > 0:
+                self.execute_command(
+                    """
+                    UPDATE inventory SET quantity=quantity-%s
+                    WHERE itemid=%s AND expirationdate=%s AND cost_per_unit=%s AND quantity>=%s
+                    """,
+                    (take, int(itemid), row['expirationdate'], row['cost_per_unit'], take)
+                )
+                left -= take
             if left <= 0:
                 break
         return qty - left
@@ -107,104 +200,7 @@ class DeclareHandler(DatabaseManager):
         """, (locid,))
         return df if not df.empty else pd.DataFrame(columns=["itemid", "name", "barcode", "quantity"])
 
-def map_with_highlights_and_textlabels(locs, highlight_locs, allowed_locids):
-    import math
-    shapes = []
-    polygons = []
-    label_x = []
-    label_y = []
-    label_text = []
-    trace_x = []
-    trace_y = []
-    trace_text = []
-    min_x = min_y = float("inf")
-    max_x = max_y = float("-inf")
-    any_loc = False
-
-    for row in locs:
-        if str(row["locid"]) not in allowed_locids:
-            continue
-        x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
-        deg = float(row.get("rotation_deg") or 0)
-        cx, cy = x + w/2, 1 - (y + h/2)
-        y_draw = 1 - y - h
-        min_x = min(min_x, x)
-        min_y = min(min_y, y_draw)
-        max_x = max(max_x, x + w)
-        max_y = max(max_y, y_draw + h)
-        any_loc = True
-        is_hi = row["locid"] in highlight_locs
-        fill = "rgba(220,53,69,0.34)" if is_hi else "rgba(180,180,180,0.11)"
-        line = dict(width=2 if is_hi else 1.2, color="#d8000c" if is_hi else "#888")
-
-        if deg == 0:
-            shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
-        else:
-            rad = math.radians(deg)
-            cos, sin = math.cos(rad), math.sin(rad)
-            pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
-            abs_pts = [(cx + u * cos - v * sin, cy + u * sin + v * cos) for u, v in pts]
-            min_x = min([min_x] + [p[0] for p in abs_pts])
-            min_y = min([min_y] + [p[1] for p in abs_pts])
-            max_x = max([max_x] + [p[0] for p in abs_pts])
-            max_y = max([max_y] + [p[1] for p in abs_pts])
-            path = "M " + " L ".join(f"{x_},{y_}" for x_, y_ in abs_pts) + " Z"
-            shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
-
-        trace_x.append(cx)
-        trace_y.append(cy)
-        trace_text.append(row.get("label", row["locid"]))
-
-        label_x.append(cx)
-        label_y.append(cy)
-        label_text.append(row.get("label", row["locid"]))
-
-        polygons.append({
-            "locid": row["locid"],
-            "center": (cx, cy)
-        })
-
-        if is_hi:
-            r = max(w, h) * 0.5
-            shapes.append(dict(type="circle",xref="x",yref="y",
-                               x0=cx-r,x1=cx+r,y0=cy-r,y1=cy+r,
-                               line=dict(color="#d8000c",width=2,dash="dot")))
-
-    fig = go.Figure()
-    fig.update_layout(shapes=shapes, height=460, margin=dict(l=12,r=12,t=10,b=5),
-                      plot_bgcolor="#f8f9fa")
-    if any_loc:
-        expand_x = (max_x - min_x) * 0.07
-        expand_y = (max_y - min_y) * 0.07
-        fig.update_xaxes(visible=False, range=[min_x - expand_x, max_x + expand_x], constrain="domain", fixedrange=True)
-        fig.update_yaxes(visible=False, range=[min_y - expand_y, max_y + expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
-    else:
-        fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
-        fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
-    fig.add_scatter(
-        x=trace_x, y=trace_y, text=trace_text,
-        mode="markers",
-        marker=dict(size=16, opacity=0.3, color="rgba(0,0,0,0.01)"),
-        hoverinfo="text",
-        name="Shelves"
-    )
-    fig.add_scatter(
-        x=label_x, y=label_y, text=label_text,
-        mode="text",
-        textposition="middle center",
-        textfont=dict(size=13, color="#19375a", family="monospace"),
-        showlegend=False,
-        hoverinfo="none",
-        name="LocID Labels"
-    )
-    return fig, polygons, trace_text
-
-st.set_page_config(layout="centered")
-st.title("🟢 Declare Selling Area Quantity (by Barcode)")
-
-handler = DeclareHandler()
-map_handler = ShelfMapHandler()
-
+# --------- STYLE ---------
 st.markdown("""
 <style>
 .catline {margin:0.08em 0 0.09em 0;font-size:1.1em;}
@@ -226,13 +222,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --------- STATE ---------
 if "latest_declaration" not in st.session_state:
     st.session_state["latest_declaration"] = {}
 if "latest_itemid" not in st.session_state:
     st.session_state["latest_itemid"] = None
 
+handler = DeclareHandler()
+map_handler = ShelfMapHandler()
+
 tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 
+# --------- CORE FLOW ---------
 def declare_logic(barcode, reset_callback):
     item = None
     itemid = None
@@ -242,7 +243,7 @@ def declare_logic(barcode, reset_callback):
         if item is not None:
             itemid = int(item['itemid'])
 
-    # If new item scanned/entered, clear previous declaration message
+    # Clear previous declaration when the item changes
     if itemid is not None and st.session_state.get("latest_itemid") != itemid:
         st.session_state["latest_declaration"] = {}
         st.session_state["latest_itemid"] = itemid
@@ -252,62 +253,64 @@ def declare_logic(barcode, reset_callback):
         return
 
     if item is not None:
+        # Item header
         st.markdown(f"**Item:** {item['name']}<br>🔖 Barcode: {item['barcode']}", unsafe_allow_html=True)
         st.markdown(
             f"<div class='catline'><span class='cat-class'>Class:</span> <span class='cat-val'>{item['classcat']}</span></div>"
             f"<div class='catline'><span class='cat-dept'>Department:</span> <span class='cat-val'>{item['departmentcat']}</span></div>"
             f"<div class='catline'><span class='cat-sect'>Section:</span> <span class='cat-val'>{item['sectioncat']}</span></div>"
             f"<div class='catline'><span class='cat-family'>Family:</span> <span class='cat-val'>{item['familycat']}</span></div>",
-            unsafe_allow_html=True)
+            unsafe_allow_html=True
+        )
+
+        # DB pulls
         shelf_entries = handler.get_shelf_entries(itemid)
         inventory_total = handler.get_inventory_total(itemid)
         all_locids = handler.get_all_locids()
 
-        shelf_locs = [row for row in map_handler.get_locations() if str(row["locid"]) in FILTERED_LOCIDS]
+        # Map data (only allowed locids)
+        raw_locs = [row for row in map_handler.get_locations() if str(row.get("locid")) in FILTERED_LOCIDS]
         highlight_locs = shelf_entries["locid"].tolist() if not shelf_entries.empty else []
 
-        st.markdown("#### 🗺️ Shelf Map — click any cell to see shelf name/ID")
-        fig, polygons, trace_text = map_with_highlights_and_textlabels(shelf_locs, highlight_locs, FILTERED_LOCIDS)
-        clicked_locid = None
+        st.markdown("#### 🗺️ Shelf Map (pydeck) — hover any cell to see label/ID")
+        deck = shelf_map_pydeck_highlight(raw_locs, highlight_locs, FILTERED_LOCIDS)
+        st.pydeck_chart(deck, use_container_width=True)
 
-        if PLOTLY_EVENTS_AVAILABLE:
-            events = plotly_events(fig, click_event=True, hover_event=False, select_event=False, key="main_shelf_map", override_height=510)
-            if events:
-                point = events[0]
-                idx = point["pointIndex"]
-                if 0 <= idx < len(polygons):
-                    clicked_locid = polygons[idx]["locid"]
-                    st.success(f"You clicked: **{clicked_locid}**")
-        else:
-            st.plotly_chart(fig, use_container_width=True)
-            st.info("Install streamlit-plotly-events for click support: pip install streamlit-plotly-events")
-
+        # Previous quantity & default locid suggestion
         prev_qty = 0
         prev_locid = ""
         if shelf_entries.empty:
             st.warning("No previous quantity declared for this item in the selling area.")
         else:
-            prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries)==1 else ""
-            prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries)==1 else 0
+            prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries) == 1 else ""
+            prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries) == 1 else 0
 
-        locid = st.selectbox(
-            "Shelf Location (locid)",
-            options=all_locids,
-            index=all_locids.index(prev_locid) if prev_locid in all_locids else 0 if all_locids else 0,
-            key="declare_locid",
-            help="Type or pick from the filtered list. Press Enter to confirm your choice."
-        ) if all_locids else st.text_input("Shelf Location (locid)", key="declare_locid", max_chars=32)
+        # Location selector (since pydeck clicks aren't captured in Streamlit)
+        if all_locids:
+            locid = st.selectbox(
+                "Shelf Location (locid)",
+                options=all_locids,
+                index=all_locids.index(prev_locid) if prev_locid in all_locids else 0,
+                key="declare_locid",
+                help="Pick from the filtered list. Hover the map to verify labels."
+            )
+        else:
+            locid = st.text_input("Shelf Location (locid)", key="declare_locid", max_chars=32)
 
-        st.info(f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
-                f"**Available in inventory:** {inventory_total}")
+        st.info(
+            f"**Current (previous) quantity in selling area:** {prev_qty}  \n"
+            f"**Available in inventory:** {inventory_total}"
+        )
 
-        new_qty = st.number_input("Declare current selling area quantity", min_value=0, value=prev_qty, step=1, key="declare_qty")
+        new_qty = st.number_input(
+            "Declare current selling area quantity",
+            min_value=0, value=prev_qty, step=1, key="declare_qty"
+        )
 
-        col1, col2 = st.columns([2,1])
+        col1, col2 = st.columns([2, 1])
         confirm_clicked = False
         with col1:
-            confirm = st.button("✅ Confirm Declaration", type="primary")
-            if confirm:
+            if st.button("✅ Confirm Declaration", type="primary"):
                 confirm_clicked = True
         with col2:
             if st.button("🔄 New Scan", type="secondary"):
@@ -320,9 +323,11 @@ def declare_logic(barcode, reset_callback):
                 actual_subtracted = handler.subtract_inventory(itemid, diff)
                 st.success(f"Inventory reduced by {actual_subtracted}.")
             elif diff < 0:
-                st.info("Declared quantity is less than previous; only updating shelf record, not adding back to inventory.")
+                st.info("Declared quantity is less than previous; only updating shelf record (no add-back to inventory).")
+
             handler.set_shelf_quantity(itemid, locid, new_qty)
             st.success(f"Selling area quantity for '{item['name']}' at {locid} is now {new_qty}.")
+
             st.session_state["latest_declaration"] = {
                 "itemid": itemid,
                 "itemname": item['name'],
@@ -330,7 +335,7 @@ def declare_logic(barcode, reset_callback):
                 "locid": locid,
                 "qty": new_qty
             }
-            st.rerun()  # ONE-TOUCH: rerun instantly after declaring!
+            st.rerun()  # instant feedback
 
     elif barcode.strip():
         st.error("❌ Barcode not found in the item table.")
@@ -351,11 +356,14 @@ def show_latest_declaration_and_items():
             """,
             unsafe_allow_html=True
         )
-        handler = DeclareHandler()
-        items_at_location = handler.get_items_at_location(latest["locid"])
+
+        items_at_location = DeclareHandler().get_items_at_location(latest["locid"])
         items_at_location = items_at_location[items_at_location["quantity"] > 0]
         if not items_at_location.empty:
-            st.markdown(f"<br/><b>All items at location <span style='color:#098A23'>{latest['locid']}</span>:</b>", unsafe_allow_html=True)
+            st.markdown(
+                f"<br/><b>All items at location <span style='color:#098A23'>{latest['locid']}</span>:</b>",
+                unsafe_allow_html=True
+            )
             st.dataframe(
                 items_at_location.rename(columns={
                     "itemid": "Item ID",
@@ -374,10 +382,14 @@ def reset_camera_scan():
         if k in st.session_state:
             st.session_state.pop(k)
 
+# --------- TABS ---------
 with tab1:
     barcode = ""
     if QR_AVAILABLE:
-        st.markdown("<div class='scan-hint'>Aim the barcode at your phone or webcam for instant detection.<br>Hold steady and close to the lens.</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='scan-hint'>Aim the barcode at your phone or webcam for instant detection.<br>Hold steady and close to the lens.</div>",
+            unsafe_allow_html=True
+        )
         barcode = qrcode_scanner(key="barcode_cam") or ""
         if barcode:
             st.success(f"Scanned: {barcode}")
