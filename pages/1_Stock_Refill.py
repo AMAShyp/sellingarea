@@ -1,4 +1,4 @@
-# streamlit_low_stock_pydeck_red_only.py
+# streamlit_low_stock_pydeck_fullmap_minlabels.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -37,44 +37,45 @@ def make_rectangle(x, y, w, h, deg):
     abs_pts = rotated + [cx, cy]
     return abs_pts.tolist() + [abs_pts[0].tolist()]  # close polygon
 
-def build_deck_red_highlight(shelf_locs, highlight_locs):
+def build_deck(shelf_locs, highlight_locs):
     """
     Build a pydeck.Deck:
       - All shelves drawn as polygons
-      - Shelves in highlight_locs become red with stronger outline
-      - No text labels rendered on the map
+      - Highlight shelves in highlight_locs in red (no always-visible labels)
+      - Labels/locids appear on hover via tooltip
     """
     hi = set(map(str, highlight_locs))
     rows = []
-
     for row in shelf_locs:
         locid = str(row.get("locid"))
         x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
         coords = make_rectangle(x, y, w, h, deg)
+        label = str(row.get("label") or locid)
 
         is_hi = locid in hi
-        fill_rgb = (220, 53, 69) if is_hi else (180, 180, 180)   # red vs grey
+        fill_rgb = (220, 53, 69) if is_hi else (180, 180, 180)   # red-ish vs grey
         line_rgb = (216, 0, 12) if is_hi else (120, 120, 120)
         fill_a = 190 if is_hi else 70
         line_a = 255
 
         rows.append({
             "polygon": coords,
+            "label": label,
+            "locid": locid,
             "fill_color": list(fill_rgb) + [fill_a],
             "line_color": list(line_rgb) + [line_a],
         })
 
     df = pd.DataFrame(rows)
-
     polygon_layer = pdk.Layer(
         "PolygonLayer",
         data=df,
         get_polygon="polygon",
         get_fill_color="fill_color",
         get_line_color="line_color",
-        pickable=False,       # no hover/click; purely visual
-        auto_highlight=False, # keep stable colors
+        pickable=True,
+        auto_highlight=True,
         filled=True,
         stroked=True,
         get_line_width=2,
@@ -87,7 +88,11 @@ def build_deck_red_highlight(shelf_locs, highlight_locs):
     return pdk.Deck(
         layers=[polygon_layer],
         initial_view_state=view_state,
-        map_provider=None,   # normalized 0..1 canvas
+        map_provider=None,  # normalized 0..1 canvas
+        tooltip={
+            "html": "<b>{label}</b><br/><span style='font-family:monospace'>{locid}</span>",
+            "style": {"backgroundColor": "white", "color": "#222", "fontSize": "14px", "font-family": "monospace"},
+        },
         height=360,
     )
 
@@ -151,7 +156,7 @@ class BarcodeShelfHandler(DatabaseManager):
 
 # ---------------- PAGE SETUP ----------------
 st.set_page_config(layout="wide")
-st.title("📤 Low‑Stock Items Map (Red Highlight) — Pydeck")
+st.title("📤 Low‑Stock Items Map (All Inventory Batches Shown) — Pydeck")
 
 # ---------------- LOAD DATA ----------------
 handler = BarcodeShelfHandler()
@@ -164,7 +169,7 @@ if low_items.empty:
 
 shelf_locs = map_handler.get_locations()
 
-# Shelves to highlight: locid of the first shelf layer for each low-stock item
+# Shelves to highlight: locid of the first shelf layer for each low item
 hi_locs = sorted({
     handler.get_first_layer(r.itemid).get("locid", "")
     for r in low_items.itertuples()
@@ -172,9 +177,8 @@ hi_locs = sorted({
 })
 
 # ---------------- MAP ----------------
-st.markdown("#### 🗺️ Red = shelves to refill")
-deck = build_deck_red_highlight(shelf_locs, hi_locs)
-st.pydeck_chart(deck, use_container_width=True)
+st.markdown("#### 🗺️ Red = shelves to refill (labels appear on hover)")
+st.pydeck_chart(build_deck(shelf_locs, hi_locs), use_container_width=True)
 
 # ---------------- STYLES ----------------
 st.markdown("""
@@ -190,9 +194,6 @@ st.markdown("""
 .inv-batch{background:#fff1e3;display:inline-block;margin:0.08em 0.3em 0.08em 0;padding:0.08em 0.65em 0.08em 0.65em;
            border-radius:.45em;border:1px solid #f1d1aa;font-size:1.03em;}
 .good{color:green;font-weight:bold;}.bad{color:#c00;font-weight:bold;}
-.scan-btn button{background:#FFB300!important;color:#252a2c!important;font-weight:bold;border-radius:.35em!important;}
-.refill-btn button{background:#1abc9c!important;color:#fff!important;font-weight:bold;
-                   border-radius:.45rem!important;padding:.15rem .57rem!important;margin-top:.03rem}
 .scan-hint{font-size:1.05em;color:#087911;font-weight:600;background:#eafdff;padding:.2em .6em;border-radius:.45em;}
 </style>
 """, unsafe_allow_html=True)
