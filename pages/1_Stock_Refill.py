@@ -1,4 +1,4 @@
-# streamlit_low_stock_pydeck_fullmap_minlabels.py
+# streamlit_low_stock_pydeck_singlelabel.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -41,8 +41,8 @@ def build_deck(shelf_locs, highlight_locs):
     """
     Build a pydeck.Deck:
       - All shelves drawn as polygons
-      - Highlight shelves in highlight_locs in red (no always-visible labels)
-      - Labels/locids appear on hover via tooltip
+      - Highlight shelves in highlight_locs in red
+      - Tooltip shows a single label (prefers 'label', falls back to 'locid')
     """
     hi = set(map(str, highlight_locs))
     rows = []
@@ -51,7 +51,9 @@ def build_deck(shelf_locs, highlight_locs):
         x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = float(row.get("rotation_deg") or 0)
         coords = make_rectangle(x, y, w, h, deg)
-        label = str(row.get("label") or locid)
+
+        # single text to show in tooltip
+        label_text = str(row.get("label") or locid)
 
         is_hi = locid in hi
         fill_rgb = (220, 53, 69) if is_hi else (180, 180, 180)   # red-ish vs grey
@@ -61,8 +63,7 @@ def build_deck(shelf_locs, highlight_locs):
 
         rows.append({
             "polygon": coords,
-            "label": label,
-            "locid": locid,
+            "label_text": label_text,     # <-- only this will be used in tooltip
             "fill_color": list(fill_rgb) + [fill_a],
             "line_color": list(line_rgb) + [line_a],
         })
@@ -90,7 +91,7 @@ def build_deck(shelf_locs, highlight_locs):
         initial_view_state=view_state,
         map_provider=None,  # normalized 0..1 canvas
         tooltip={
-            "html": "<b>{label}</b><br/><span style='font-family:monospace'>{locid}</span>",
+            "html": "<b>{label_text}</b>",
             "style": {"backgroundColor": "white", "color": "#222", "fontSize": "14px", "font-family": "monospace"},
         },
         height=360,
@@ -177,7 +178,7 @@ hi_locs = sorted({
 })
 
 # ---------------- MAP ----------------
-st.markdown("#### 🗺️ Red = shelves to refill (labels appear on hover)")
+st.markdown("#### 🗺️ Red = shelves to refill (single-line label on hover)")
 st.pydeck_chart(build_deck(shelf_locs, hi_locs), use_container_width=True)
 
 # ---------------- STYLES ----------------
