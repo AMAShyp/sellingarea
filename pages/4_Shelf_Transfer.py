@@ -14,30 +14,36 @@ class ShelfTransferHandler(DatabaseManager):
 
     def get_shelf_items(self, locid: str) -> pd.DataFrame:
         """
-        Compute live (derived) quantities per item at a given shelf location
-        by summing signed movements from shelfentries.
+        Compute live quantities per item at a given shelf location
+        by summing history from shelfentries using ONLY trx_type mapping:
+
+          + STOCKTAKE, RECEIVE, TRANSFER-TO
+          - RETURN, TRANSFER-FROM, DEFECT
+
+        We also tolerate common variants like with spaces/underscores.
         """
         q = """
-        WITH signed AS (
+        WITH norm AS (
           SELECT
             se.itemid,
             se.locid,
-            -- Quantity is always positive (CHECK constraint). We apply the sign by trx_type.
-            CASE
-              WHEN se.trx_type IN ('RECEIVE','RETURN','TRANSFER TO') THEN +1
-              WHEN se.trx_type IN ('SALE','WRITE_OFF','TRANSFER FROM') THEN -1
-              WHEN se.trx_type IN ('ADJUSTMENT','STOCKTAKE') THEN
-                CASE
-                  WHEN UPPER(COALESCE(se.reference_type,'')) = 'IN'  THEN +1
-                  WHEN UPPER(COALESCE(se.reference_type,'')) = 'OUT' THEN -1
-                  WHEN LEFT(TRIM(COALESCE(se.note,'')),1) = '+'      THEN +1
-                  WHEN LEFT(TRIM(COALESCE(se.note,'')),1) = '-'      THEN -1
-                  ELSE 0
-                END
-              ELSE 0
-            END * se.quantity::numeric AS signed_qty
+            se.quantity::numeric AS qty,
+            UPPER(TRIM(se.trx_type)) AS t
           FROM shelfentries se
           WHERE se.locid = %s
+        ),
+        signed AS (
+          SELECT
+            itemid,
+            locid,
+            CASE
+              -- POSITIVE
+              WHEN t IN ('STOCKTAKE','RECEIVE','TRANSFER-TO','TRANSFER TO','TRANSFER_TO') THEN +qty
+              -- NEGATIVE
+              WHEN t IN ('RETURN','TRANSFER-FROM','TRANSFER FROM','TRANSFER_FROM','DEFECT') THEN -qty
+              ELSE 0
+            END AS signed_qty
+          FROM norm
         )
         SELECT
           s.locid,
@@ -57,33 +63,32 @@ class ShelfTransferHandler(DatabaseManager):
     def transfer_pair(self, itemid: int, source_locid: str, target_locid: str, qty: int, note: str = "shelf transfer"):
         """
         Insert two shelfentries rows for a shelf-to-shelf transfer:
-        1) source_locid with trx_type='TRANSFER FROM'
-        2) target_locid with trx_type='TRANSFER TO'
-        Use CURRENT_DATE for expirationdate (required NOT NULL).
-        Link the pair via reference_type='SHELF_TRANSFER' and reference_id = entryid of the first row.
+          1) source_locid with trx_type='TRANSFER-FROM' (negative)
+          2) target_locid with trx_type='TRANSFER-TO'   (positive)
+
+        We set expirationdate = CURRENT_DATE to satisfy NOT NULL.
+        entryid/created_at/createdby/entrydate rely on table defaults.
         """
-        # First insert: FROM (outflow)
-        from_entry_id = self.execute_command_returning(
+        # FROM (outflow on source)
+        self.execute_command(
             """
             INSERT INTO shelfentries
               (itemid, quantity, expirationdate, locid, trx_type, note, reference_type)
             VALUES
-              (%s, %s, CURRENT_DATE, %s, 'TRANSFER FROM', %s, 'SHELF_TRANSFER')
-            RETURNING entryid;
+              (%s, %s, CURRENT_DATE, %s, 'TRANSFER-FROM', %s, 'SHELF_TRANSFER');
             """,
-            (int(itemid), int(qty), str(source_locid), note),
-            returning_col="entryid"
+            (int(itemid), int(qty), str(source_locid), note)
         )
 
-        # Second insert: TO (inflow), referencing the first
+        # TO (inflow on target)
         self.execute_command(
             """
             INSERT INTO shelfentries
-              (itemid, quantity, expirationdate, locid, trx_type, note, reference_type, reference_id)
+              (itemid, quantity, expirationdate, locid, trx_type, note, reference_type)
             VALUES
-              (%s, %s, CURRENT_DATE, %s, 'TRANSFER TO', %s, 'SHELF_TRANSFER', %s);
+              (%s, %s, CURRENT_DATE, %s, 'TRANSFER-TO', %s, 'SHELF_TRANSFER');
             """,
-            (int(itemid), int(qty), str(target_locid), note, int(from_entry_id))
+            (int(itemid), int(qty), str(target_locid), note)
         )
 
 # ================== UI ==================
@@ -117,13 +122,13 @@ with colB:
 source_items = handler.get_shelf_items(source_locid)
 
 if source_items.empty:
-    st.info(f"No items currently available on shelf `{source_locid}` (derived from history).")
+    st.info(f"No items currently available on shelf `{source_locid}` (derived from shelfentries).")
 else:
     st.markdown(f"### Transfer from `{source_locid}` to `{target_locid}`")
 
     transfer_dict = {}
     transfer_table = []
-    for idx, row in source_items.iterrows():
+    for _, row in source_items.iterrows():
         itemid = int(row["itemid"])
         name = row["name"]
         barcode = row["barcode"]
@@ -182,9 +187,9 @@ else:
                     errors.append(f"{name} ({barcode}): {e}")
 
         if any_transferred and not errors:
-            st.success("Transfer completed successfully (recorded as append-only entries).")
+            st.success("Transfer recorded (two shelfentries rows per item).")
         elif any_transferred and errors:
-            st.warning("Transfer partially completed. Some items failed:")
+            st.warning("Transfer partially recorded. Some items failed:")
             for err in errors:
                 st.write(f"- {err}")
         else:
@@ -195,7 +200,7 @@ else:
 st.markdown(
     "<div style='margin-top:2em;color:#888;font-size:0.95em'>"
     "This page writes only to <b>shelfentries</b>. Each transfer inserts two rows: "
-    "<code>TRANSFER FROM</code> at the source shelf and <code>TRANSFER TO</code> at the target shelf. "
-    "Quantities shown are derived from the full shelfentries history (no direct updates or deletes).</div>",
+    "<code>TRANSFER-FROM</code> at the source shelf and <code>TRANSFER-TO</code> at the target shelf. "
+    "Quantities shown are derived from the full shelfentries history using trx_type signs only.</div>",
     unsafe_allow_html=True
 )
