@@ -118,7 +118,7 @@ class DeclareHandler(DatabaseManager):
         """, (barcode,))
         return df.iloc[0] if not df.empty else None
 
-    # READ-ONLY inventory total (still allowed)
+    # READ-ONLY inventory total (optional info)
     def get_inventory_total(self, itemid):
         df = self.fetch_data("""
             SELECT SUM(quantity) as total
@@ -137,15 +137,15 @@ class DeclareHandler(DatabaseManager):
         """, (int(itemid),))
         return df["locid"].tolist() if not df.empty else []
 
-    # Insert a new declaration row (append-only)
+    # Insert a new declaration row (append-only) — NO expirationdate
     def insert_declaration(self, itemid, locid, qty, who="Unknown"):
-        # expirationdate is NOT NULL in your schema; using CURRENT_DATE here.
-        # entrydate/created_at/createdby default are handled by your table defaults.
+        # entrydate/created_at/createdby are handled by table defaults.
+        # We omit expirationdate entirely per your new rule (must allow NULL).
         self.execute_command("""
             INSERT INTO shelfentries
-                (itemid, quantity, expirationdate, locid, trx_type, note, reference_id, reference_type)
+                (itemid, quantity, locid, trx_type, note, reference_id, reference_type)
             VALUES
-                (%s, %s, CURRENT_DATE, %s, 'STOCKTAKE', 'declare', NULL, NULL)
+                (%s, %s, %s, 'STOCKTAKE', 'declare', NULL, NULL)
         """, (int(itemid), int(qty), str(locid)))
 
     # Recent declarations at a location (for the bottom panel)
@@ -224,15 +224,13 @@ def declare_logic(barcode, reset_callback):
     )
 
     # ---------- Data pulls ----------
-    # Historical locids for highlight (no shelf table anymore)
     item_locs_history = handler.get_item_locations(itemid)
-    inventory_total = handler.get_inventory_total(itemid)  # read-only
+    inventory_total = handler.get_inventory_total(itemid)  # read-only info
     shelf_locs = map_handler.get_locations()  # FULL MAP
 
     # ---------- MAP (click to select) ----------
     st.markdown("#### 🗺️ Click a shelf to select it")
     deck = build_deck(shelf_locs, item_locs_history, st.session_state["picked_locid"])
-    # IMPORTANT: on_select="rerun" to get click events; single-object selection
     event = st.pydeck_chart(
         deck,
         use_container_width=True,
@@ -254,8 +252,7 @@ def declare_logic(barcode, reset_callback):
                 if locid_clicked:
                     st.session_state["picked_locid"] = locid_clicked
     except Exception:
-        # If selection state format changes, fail gracefully without breaking UI
-        pass
+        pass  # fail gracefully
 
     # ---------- Chosen shelf ----------
     chosen_locid = st.session_state["picked_locid"]
@@ -273,7 +270,6 @@ def declare_logic(barcode, reset_callback):
         min_value=0, value=0, step=1, key="declare_qty", label_visibility="visible"
     )
 
-    # Fallback manual locid input if user wants to override
     manual_locid = st.text_input(
         "Or type a locid (optional)",
         value=chosen_locid,
@@ -299,7 +295,7 @@ def declare_logic(barcode, reset_callback):
             st.error("Quantity must be greater than zero to declare.")
             return
 
-        # Append-only: insert a new row into shelfentries
+        # Append-only: insert a new row into shelfentries (NO expirationdate)
         handler.insert_declaration(itemid=itemid, locid=final_locid, qty=new_qty)
 
         st.success(f"Recorded declaration for '{item['name']}' at {final_locid} with quantity {new_qty}.")
@@ -328,7 +324,6 @@ def show_latest_declaration_and_items():
             </div>""",
             unsafe_allow_html=True
         )
-        # Show recent declarations at this location (append-only history)
         recents = DeclareHandler().get_recent_declarations_at_location(latest["locid"])
         if not recents.empty:
             st.markdown(
