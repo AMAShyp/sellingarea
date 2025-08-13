@@ -27,7 +27,7 @@ class ExpiryHandler(DatabaseManager):
              until we cover final_qty (per-item running sum).
           3) Returns:
              - QUANT per item (recv/rtn_def/sales/ret/final)
-             - DETAIL rows for the allocated batches (used_from_batch, days_left)
+             - DETAIL rows for the allocated batches (used_from_batch, days_left INT)
         """
         q = """
         WITH inv_break AS (
@@ -119,9 +119,10 @@ class ExpiryHandler(DatabaseManager):
             c.take AS used_from_batch,
             c.expirationdate,
             c.received_ts,
+            -- IMPORTANT FIX: cast to INT days so pandas arithmetic works
             (CASE
                WHEN c.expirationdate IS NOT NULL
-                THEN (c.expirationdate - CURRENT_DATE)
+               THEN (c.expirationdate - CURRENT_DATE)::int
                ELSE NULL
              END) AS days_left,
             (CASE
@@ -154,8 +155,11 @@ class ExpiryHandler(DatabaseManager):
 handler = ExpiryHandler()
 
 st.markdown("#### Settings")
-near_days = st.number_input("Near-expiry threshold (days)", min_value=1, max_value=365, value=30, step=1,
-                            help="Units expiring within this many days are counted in “Units ≤ X days”.")
+near_days = st.number_input(
+    "Near-expiry threshold (days)",
+    min_value=1, max_value=365, value=30, step=1,
+    help="Units expiring within this many days are counted in “Units ≤ X days”."
+)
 
 # Fetch data
 quant_df, detail_df = handler.get_quantities_and_allocations(near_days)
@@ -170,23 +174,35 @@ if not quant_df.empty and meta is not None and not meta.empty:
     quant_df = quant_df.merge(meta, on="itemid", how="left")
 
 # ===== Build expiry stats from allocated batches (detail_df) =====
-stats = None
+stats = pd.DataFrame(columns=["itemid","soonest_days_left","latest_days_left","avg_days_left","units_within_threshold"])
+
 if not detail_df.empty:
     d = detail_df.copy()
     # Only rows that contributed to Net Remain
     d = d[d["used_from_batch"].notna() & (d["used_from_batch"] > 0)]
-    # Days-left metrics computed on rows that have non-null days_left
-    d_valid = d[d["days_left"].notna()].copy()
 
-    # Soonest, weighted average, latest days left
-    # Weighted avg by used_from_batch
+    # Ensure numeric types
+    if "days_left" in d.columns:
+        d["days_left"] = pd.to_numeric(d["days_left"], errors="coerce")
+    if "used_from_batch" in d.columns:
+        d["used_from_batch"] = pd.to_numeric(d["used_from_batch"], errors="coerce")
+
+    # Valid rows for days-left metrics
+    d_valid = d[d["days_left"].notna() & d["used_from_batch"].notna() & (d["used_from_batch"] > 0)].copy()
+
     if not d_valid.empty:
-        # groupby computations
         grp = d_valid.groupby("itemid", as_index=False)
+
         soonest = grp["days_left"].min().rename(columns={"days_left":"soonest_days_left"})
         latest  = grp["days_left"].max().rename(columns={"days_left":"latest_days_left"})
-        wavg    = grp.apply(lambda g: (g["days_left"]*g["used_from_batch"]).sum()/g["used_from_batch"].sum()) \
-                    .reset_index().rename(columns={0:"avg_days_left"})
+
+        # Weighted average (guard against zero division)
+        def _wavg(g):
+            w = g["used_from_batch"].sum()
+            return float((g["days_left"] * g["used_from_batch"]).sum() / w) if w and w != 0 else None
+
+        wavg = grp.apply(_wavg).reset_index().rename(columns={0:"avg_days_left"})
+
         stats = soonest.merge(latest, on="itemid", how="outer").merge(wavg, on="itemid", how="outer")
     else:
         stats = pd.DataFrame(columns=["itemid","soonest_days_left","latest_days_left","avg_days_left"])
@@ -194,14 +210,17 @@ if not detail_df.empty:
     # Count units within threshold (≤ near_days) among allocated batches
     within = d[(d["days_left"].notna()) & (d["days_left"] <= near_days)].groupby("itemid", as_index=False)["used_from_batch"].sum()
     within = within.rename(columns={"used_from_batch": "units_within_threshold"})
-    stats = stats.merge(within, on="itemid", how="left") if stats is not None else within
-else:
-    stats = pd.DataFrame(columns=["itemid","soonest_days_left","latest_days_left","avg_days_left","units_within_threshold"])
+
+    if stats.empty:
+        stats = within
+    else:
+        stats = stats.merge(within, on="itemid", how="left")
 
 # Merge stats into quantities
 out = quant_df.copy() if not quant_df.empty else pd.DataFrame()
 if not out.empty:
     out = out.merge(stats, on="itemid", how="left")
+
     # Ensure display columns exist
     for col in ["name","barcode","recv_qty","rtn_def_qty","sales_qty","sale_return_qty","final_qty",
                 "soonest_days_left","avg_days_left","latest_days_left","units_within_threshold"]:
