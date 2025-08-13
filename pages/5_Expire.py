@@ -2,275 +2,217 @@ import streamlit as st
 import pandas as pd
 import datetime
 from db_handler import DatabaseManager
-from shelf_map.shelf_map_handler import ShelfMapHandler
-import plotly.graph_objects as go
 
-LOCID_CSV_PATH = "assets/locid_list.csv"
-locid_df = pd.read_csv(LOCID_CSV_PATH)
-FILTERED_LOCIDS = set(str(l).strip() for l in locid_df["locid"].dropna().unique())
-
+# ================== CONFIG ==================
 TODAY = pd.Timestamp(datetime.date.today())
 
-class ExpiryHandler(DatabaseManager):
-    def get_expiry_shelf_items(self, locids):
-        q = """
-            SELECT s.locid, s.itemid, i.itemnameenglish AS name, i.barcode,
-                   s.quantity, s.expirationdate, i.shelflife
-            FROM shelf s
-            JOIN item i ON s.itemid = i.itemid
-            WHERE s.locid = ANY(%s)
-            AND s.quantity > 0
-            AND s.expirationdate IS NOT NULL
-            ORDER BY s.locid, s.expirationdate
-        """
-        df = self.fetch_data(q, (list(locids),))
-        return df if not df.empty else pd.DataFrame(columns=["locid", "itemid", "name", "barcode", "quantity", "expirationdate", "shelflife"])
-
-    def get_all_locids(self):
-        return sorted(FILTERED_LOCIDS)
-
 st.set_page_config(layout="wide")
-st.title("⏳ Shelf Expiry Dashboard")
+st.title("⏳ Near-Expiry by Remaining Stock (based on latest received batches)")
 
+# ================== DATA LAYER ==================
+class ExpiryHandler(DatabaseManager):
+    def get_final_qty_per_item(self):
+        """
+        Compute final on-hand per item:
+          inventory: +RECEIVE - RETURN - DEFECT
+          salesitems: - quantity
+          sale_return_items: + quantity
+        Returns DataFrame: columns [itemid, final_qty]
+        """
+        q = """
+        WITH inv AS (
+          SELECT
+            itemid,
+            SUM(
+              CASE
+                WHEN UPPER(TRIM(trx_type)) = 'RECEIVE' THEN quantity::numeric
+                WHEN UPPER(TRIM(trx_type)) IN ('RETURN','DEFECT') THEN -quantity::numeric
+                ELSE 0::numeric
+              END
+            ) AS inv_qty
+          FROM inventory
+          GROUP BY itemid
+        ),
+        sales AS (
+          SELECT itemid, SUM(quantity::numeric) AS sales_qty
+          FROM salesitems
+          GROUP BY itemid
+        ),
+        sale_ret AS (
+          SELECT itemid, SUM(quantity::numeric) AS sale_return_qty
+          FROM sale_return_items
+          GROUP BY itemid
+        )
+        SELECT
+          COALESCE(inv.itemid, s.itemid, r.itemid) AS itemid,
+          COALESCE(inv.inv_qty, 0)
+          - COALESCE(s.sales_qty, 0)
+          + COALESCE(r.sale_return_qty, 0) AS final_qty
+        FROM inv
+        FULL JOIN sales s ON s.itemid = inv.itemid
+        FULL JOIN sale_ret r ON r.itemid = COALESCE(inv.itemid, s.itemid)
+        """
+        return self.fetch_data(q)
+
+    def get_item_meta(self):
+        """Basic item metadata (name/barcode) to join in the UI."""
+        q = "SELECT itemid, itemnameenglish AS name, barcode FROM item"
+        return self.fetch_data(q)
+
+    def get_latest_receive_batches(self, itemid, limit=10000):
+        """
+        Fetch RECEIVE batches for an item ordered by newest first.
+        We will walk these until we cover the final qty.
+        """
+        q = """
+        SELECT
+          batchid,
+          itemid,
+          quantity::numeric AS qty,
+          expirationdate,
+          COALESCE(datereceived::timestamp, created_at)::timestamp AS received_ts
+        FROM inventory
+        WHERE itemid = %s AND UPPER(TRIM(trx_type)) = 'RECEIVE'
+        ORDER BY received_ts DESC NULLS LAST, batchid DESC
+        LIMIT %s
+        """
+        return self.fetch_data(q, (int(itemid), int(limit)))
+
+# ================== UI ==================
 handler = ExpiryHandler()
-map_handler = ShelfMapHandler()
 
-st.markdown("## Near-Expiry and Expired Items (shelf batches)")
-tab1, tab2 = st.tabs(["Days-Based Expiry", "Shelf-Life Fraction"])
+st.markdown("### Step 1 — Configure near-expiry threshold")
+col_a, col_b = st.columns([1, 3])
+with col_a:
+    near_days = st.number_input("Consider near-expiry if ≤ (days)", min_value=1, max_value=365, value=30, step=1)
+with col_b:
+    st.caption("Items expiring within this many days from **today** will be counted as near-expiry when scanning the latest received batches that cover remaining stock.")
 
-def map_with_expiry(locs, shelf_colormap, label_map):
-    import math
-    shapes = []
-    label_x = []
-    label_y = []
-    label_text = []
-    min_x = min_y = float("inf")
-    max_x = max_y = float("-inf")
-    any_loc = False
+st.markdown("### Step 2 — Compute remaining stock per item")
 
-    color_map = {
-        "red": "rgba(220,53,69,0.34)",
-        "orange": "rgba(255,128,0,0.23)",
-        "green": "rgba(40,160,20,0.20)",
-        "gray": "rgba(180,180,180,0.11)"
-    }
-    line_map = {
-        "red": "#d8000c",
-        "orange": "#ff8000",
-        "green": "#098A23",
-        "gray": "#888"
-    }
+final_df = handler.get_final_qty_per_item()
+if final_df is None or final_df.empty:
+    st.info("No data available to compute final quantities.")
+    st.stop()
 
-    for row in locs:
-        locid = str(row["locid"])
-        if locid not in FILTERED_LOCIDS:
+# Only items with positive stock
+final_df = final_df[final_df["final_qty"] > 0].copy()
+
+# Join item metadata for nicer output
+meta = handler.get_item_meta()
+if meta is not None and not meta.empty:
+    final_df = final_df.merge(meta, on="itemid", how="left")
+else:
+    final_df["name"] = None
+    final_df["barcode"] = None
+
+st.dataframe(
+    final_df.rename(columns={"itemid":"Item ID","name":"Item Name","barcode":"Barcode","final_qty":"Final Qty"}),
+    use_container_width=True, hide_index=True
+)
+
+st.markdown("### Step 3 — Scan latest RECEIVE batches to cover each item’s remaining stock")
+
+# Process each item: walk latest RECEIVE batches until we cover final_qty
+rows_summary = []
+rows_detail = []  # per-batch breakdown for the table below
+
+for _, r in final_df.iterrows():
+    itemid = int(r["itemid"])
+    final_qty = float(r["final_qty"])
+    item_name = r.get("name")
+    barcode = r.get("barcode")
+
+    batches = handler.get_latest_receive_batches(itemid)
+    if batches is None or batches.empty:
+        # No receive batches found; nothing to allocate (but final_qty > 0)
+        rows_summary.append({
+            "itemid": itemid,
+            "name": item_name,
+            "barcode": barcode,
+            "final_qty": final_qty,
+            "near_expiry_qty": 0,
+            "near_expiry_batches": 0
+        })
+        continue
+
+    remain = final_qty
+    near_qty = 0
+    near_batches = 0
+
+    # iterate newest to older
+    for _, b in batches.iterrows():
+        if remain <= 0:
+            break
+        take = min(remain, float(b["qty"]) if b["qty"] is not None else 0.0)
+        if take <= 0:
             continue
-        color = shelf_colormap.get(locid, "gray")
-        x, y, w, h = map(float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
-        deg = float(row.get("rotation_deg") or 0)
-        cx, cy = x + w/2, 1 - (y + h/2)
-        y_draw = 1 - y - h
-        min_x = min(min_x, x)
-        min_y = min(min_y, y_draw)
-        max_x = max(max_x, x + w)
-        max_y = max(max_y, y_draw + h)
-        any_loc = True
-        fill = color_map.get(color, color_map["gray"])
-        line = dict(width=2 if color != "gray" else 1.2, color=line_map.get(color, "#888"))
-        if deg == 0:
-            shapes.append(dict(type="rect", x0=x, y0=y_draw, x1=x+w, y1=y_draw+h, line=line, fillcolor=fill))
-        else:
-            rad = math.radians(deg)
-            cos, sin = math.cos(rad), math.sin(rad)
-            pts = [(-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2)]
-            abs_pts = [(cx + u * cos - v * sin, cy + u * sin + v * cos) for u, v in pts]
-            min_x = min([min_x] + [p[0] for p in abs_pts])
-            min_y = min([min_y] + [p[1] for p in abs_pts])
-            max_x = max([max_x] + [p[0] for p in abs_pts])
-            max_y = max([max_y] + [p[1] for p in abs_pts])
-            path = "M " + " L ".join(f"{x_},{y_}" for x_, y_ in abs_pts) + " Z"
-            shapes.append(dict(type="path", path=path, line=line, fillcolor=fill))
-        label = label_map.get(locid, locid)
-        label_x.append(cx)
-        label_y.append(cy)
-        label_text.append(label)
-    fig = go.Figure()
-    fig.update_layout(shapes=shapes, height=430, margin=dict(l=12,r=12,t=10,b=5),
-                      plot_bgcolor="#f8f9fa")
-    if any_loc:
-        expand_x = (max_x - min_x) * 0.07
-        expand_y = (max_y - min_y) * 0.07
-        fig.update_xaxes(visible=False, range=[min_x - expand_x, max_x + expand_x], constrain="domain", fixedrange=True)
-        fig.update_yaxes(visible=False, range=[min_y - expand_y, max_y + expand_y], scaleanchor="x", scaleratio=1, fixedrange=True)
-    else:
-        fig.update_xaxes(visible=False, range=[0,1], constrain="domain", fixedrange=True)
-        fig.update_yaxes(visible=False, range=[0,1], scaleanchor="x", scaleratio=1, fixedrange=True)
-    fig.add_scatter(
-        x=label_x, y=label_y, text=label_text,
-        mode="text",
-        textposition="middle center",
-        textfont=dict(size=13, color="#003366", family="monospace"),
-        showlegend=False,
-        hoverinfo="none",
-        name="LocID Labels"
+
+        exp = pd.to_datetime(b["expirationdate"]) if pd.notna(b["expirationdate"]) else pd.NaT
+        days_left = (exp - TODAY).days if pd.notna(exp) else None
+        is_near = (days_left is not None) and (days_left <= near_days)
+
+        if is_near:
+            near_qty += take
+            near_batches += 1
+
+        rows_detail.append({
+            "itemid": itemid,
+            "name": item_name,
+            "barcode": barcode,
+            "final_qty": final_qty,
+            "used_from_batch": take,
+            "batchid": b["batchid"],
+            "batch_qty": float(b["qty"]) if b["qty"] is not None else None,
+            "expirationdate": exp.date().isoformat() if pd.notna(exp) else None,
+            "days_left": days_left,
+            "is_near_expiry": bool(is_near),
+        })
+
+        remain -= take
+
+    rows_summary.append({
+        "itemid": itemid,
+        "name": item_name,
+        "barcode": barcode,
+        "final_qty": final_qty,
+        "near_expiry_qty": near_qty,
+        "near_expiry_batches": near_batches
+    })
+
+# Summary table: how many items are near expiry per item (from latest batches covering the stock)
+summary_df = pd.DataFrame(rows_summary).sort_values(["name","itemid"]).reset_index(drop=True)
+st.markdown("#### Near-expiry summary (units within threshold among newest batches covering current stock)")
+st.dataframe(
+    summary_df.rename(columns={
+        "itemid": "Item ID",
+        "name": "Item Name",
+        "barcode": "Barcode",
+        "final_qty": "Final Qty",
+        "near_expiry_qty": f"Near-Expiry ≤ {near_days}d",
+        "near_expiry_batches": "Affected Batches"
+    }),
+    use_container_width=True, hide_index=True
+)
+
+# Detail table: which batches were counted
+detail_df = pd.DataFrame(rows_detail)
+if not detail_df.empty:
+    st.markdown("#### Batch breakdown (newest RECEIVE batches used to cover current stock)")
+    st.dataframe(
+        detail_df.rename(columns={
+            "itemid": "Item ID",
+            "name": "Item Name",
+            "barcode": "Barcode",
+            "final_qty": "Item Final Qty",
+            "used_from_batch": "Used From Batch",
+            "batchid": "Batch ID",
+            "batch_qty": "Batch Qty",
+            "expirationdate": "Expiry Date",
+            "days_left": "Days Left",
+            "is_near_expiry": "Near?"
+        }),
+        use_container_width=True, hide_index=True
     )
-    return fig
-
-# --- Tab 1: Days-Based Expiry ---
-with tab1:
-    st.subheader("⚡ Days-Based Expiry (classic expiry warning)")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        red_days = st.number_input("Red (urgent, ≤ days)", min_value=1, max_value=180, value=7, step=1)
-    with col2:
-        orange_days = st.number_input("Orange (warning, ≤ days)", min_value=red_days+1, max_value=365, value=30, step=1)
-    with col3:
-        green_days = st.number_input("Green (informational, ≤ days)", min_value=orange_days+1, max_value=999, value=85, step=1)
-
-    shelf_items = handler.get_expiry_shelf_items(FILTERED_LOCIDS)
-    if shelf_items.empty:
-        st.info("No shelf items with expiry dates found.")
-    else:
-        expiration_dates = pd.to_datetime(shelf_items["expirationdate"], errors="coerce")
-        shelf_items["days_left"] = (expiration_dates - TODAY).dt.days
-
-        def days_color(days):
-            if pd.isna(days):
-                return None
-            if days <= red_days:
-                return "red"
-            elif days <= orange_days:
-                return "orange"
-            elif days <= green_days:
-                return "green"
-            else:
-                return None
-
-        shelf_items["color"] = shelf_items["days_left"].apply(days_color)
-        display_items = shelf_items[shelf_items["color"].notnull()].copy()
-
-        st.markdown("#### 🟦 Map: Shelf with expiring items (red=most urgent, orange=soon, green=informational)")
-        shelf_colormap = {}
-        label_map = {}
-        for locid, group in display_items.groupby("locid"):
-            if "red" in group["color"].values:
-                shelf_colormap[locid] = "red"
-            elif "orange" in group["color"].values:
-                shelf_colormap[locid] = "orange"
-            elif "green" in group["color"].values:
-                shelf_colormap[locid] = "green"
-            else:
-                shelf_colormap[locid] = "gray"
-            label_map[locid] = group.sort_values("days_left").iloc[0]["name"]
-
-        shelf_locs = [row for row in map_handler.get_locations() if str(row["locid"]) in FILTERED_LOCIDS]
-        st.plotly_chart(map_with_expiry(shelf_locs, shelf_colormap, label_map), use_container_width=True, key="days_map")
-
-        st.markdown("#### Items near expiry (within alert window):")
-        st.dataframe(
-            display_items[["locid", "name", "barcode", "quantity", "expirationdate", "days_left", "color"]]
-            .rename(columns={
-                "locid": "Shelf",
-                "name": "Item Name",
-                "barcode": "Barcode",
-                "quantity": "Qty",
-                "expirationdate": "Expiry Date",
-                "days_left": "Days Left",
-                "color": "Band"
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
-
-# --- Tab 2: Shelf-Life Fraction Expiry ---
-with tab2:
-    st.subheader("⚡ Shelf-Life Fraction (shelf-life used up)")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        red_frac = st.number_input("Red (urgent, ≤ fraction left)", min_value=0.00, max_value=1.00, value=0.20, step=0.01, format="%.2f")
-    with col2:
-        orange_frac = st.number_input("Orange (warning, ≤ fraction left)", min_value=red_frac+0.01, max_value=1.00, value=0.40, step=0.01, format="%.2f")
-    with col3:
-        green_frac = st.number_input("Green (informational, ≤ fraction left)", min_value=orange_frac+0.01, max_value=1.00, value=0.80, step=0.01, format="%.2f")
-
-    shelf_items = handler.get_expiry_shelf_items(FILTERED_LOCIDS)
-    if shelf_items.empty:
-        st.info("No shelf items with expiry dates found.")
-    else:
-        expiration_dates = pd.to_datetime(shelf_items["expirationdate"], errors="coerce")
-        shelf_items["days_left"] = (expiration_dates - TODAY).dt.days
-        shelf_items["shelflife"] = pd.to_numeric(shelf_items["shelflife"], errors="coerce")
-        shelf_items["fraction_left"] = shelf_items["days_left"] / shelf_items["shelflife"]
-        shelf_items["fraction_left"] = shelf_items["fraction_left"].where(shelf_items["shelflife"] > 0, None)
-
-        def frac_color(frac):
-            if frac is None or pd.isna(frac):
-                return None
-            elif frac <= red_frac:
-                return "red"
-            elif frac <= orange_frac:
-                return "orange"
-            elif frac <= green_frac:
-                return "green"
-            else:
-                return None
-
-        shelf_items["color"] = shelf_items["fraction_left"].apply(frac_color)
-        display_items = shelf_items[shelf_items["color"].notnull()].copy()
-
-        st.markdown("#### 🟦 Map: Shelf with used-up shelf life (red=most urgent, orange=soon, green=informational)")
-        shelf_colormap = {}
-        label_map = {}
-        for locid, group in display_items.groupby("locid"):
-            if "red" in group["color"].values:
-                shelf_colormap[locid] = "red"
-            elif "orange" in group["color"].values:
-                shelf_colormap[locid] = "orange"
-            elif "green" in group["color"].values:
-                shelf_colormap[locid] = "green"
-            else:
-                shelf_colormap[locid] = "gray"
-            # Defensive: avoid empty groups for label (should not happen)
-            label_group = group.sort_values("fraction_left")
-            if not label_group.empty:
-                label_map[locid] = label_group.iloc[0]["name"]
-            else:
-                label_map[locid] = locid
-
-        shelf_locs = [row for row in map_handler.get_locations() if str(row["locid"]) in FILTERED_LOCIDS]
-        st.plotly_chart(map_with_expiry(shelf_locs, shelf_colormap, label_map), use_container_width=True, key="fraction_map")
-
-        st.markdown("#### Items with low shelf-life left:")
-        st.dataframe(
-            display_items[["locid", "name", "barcode", "quantity", "expirationdate", "days_left", "shelflife", "fraction_left", "color"]]
-            .rename(columns={
-                "locid": "Shelf",
-                "name": "Item Name",
-                "barcode": "Barcode",
-                "quantity": "Qty",
-                "expirationdate": "Expiry Date",
-                "days_left": "Days Left",
-                "shelflife": "Shelf Life",
-                "fraction_left": "Fraction Left",
-                "color": "Band"
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        missing_shelf_life = shelf_items[shelf_items["shelflife"].isna() | (shelf_items["shelflife"] <= 0)]
-        if not missing_shelf_life.empty:
-            st.markdown("#### ⚠️ Items missing shelf-life definition (not color-coded):")
-            st.dataframe(
-                missing_shelf_life[["locid", "name", "barcode", "quantity", "expirationdate", "days_left"]]
-                .rename(columns={
-                    "locid": "Shelf",
-                    "name": "Item Name",
-                    "barcode": "Barcode",
-                    "quantity": "Qty",
-                    "expirationdate": "Expiry Date",
-                    "days_left": "Days Left"
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
+else:
+    st.info("No RECEIVE batches found to allocate against current stock.")
