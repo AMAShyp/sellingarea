@@ -77,7 +77,7 @@ def build_deck(shelf_locs, highlight_locs, selected_locid=""):
 
     layers = [base_layer]
 
-    # Optional selected overlay (blue outline + semi‑transparent fill)
+    # Optional selected overlay (blue outline + semi-transparent fill)
     if selected_locid:
         sel_df = df[df["locid"] == str(selected_locid)]
         if not sel_df.empty:
@@ -118,17 +118,7 @@ class DeclareHandler(DatabaseManager):
         """, (barcode,))
         return df.iloc[0] if not df.empty else None
 
-    def get_shelf_entries(self, itemid):
-        df = self.fetch_data("""
-            SELECT locid, SUM(quantity) as qty
-            FROM shelf
-            WHERE itemid=%s
-            GROUP BY locid
-            HAVING SUM(quantity) > 0
-            ORDER BY locid
-        """, (int(itemid),))
-        return df if not df.empty else df
-
+    # READ-ONLY inventory total (still allowed)
     def get_inventory_total(self, itemid):
         df = self.fetch_data("""
             SELECT SUM(quantity) as total
@@ -137,53 +127,44 @@ class DeclareHandler(DatabaseManager):
         """, (int(itemid),))
         return int(df.iloc[0]['total']) if not df.empty and df.iloc[0]['total'] is not None else 0
 
-    def subtract_inventory(self, itemid, qty):
-        batches = self.fetch_data("""
-            SELECT expirationdate, cost_per_unit, quantity
-            FROM inventory
-            WHERE itemid=%s AND quantity > 0
-            ORDER BY expirationdate ASC, cost_per_unit ASC
-        """, (int(itemid),))
-        left = qty
-        for _, row in batches.iterrows():
-            take = min(left, int(row['quantity']))
-            if take > 0:
-                self.execute_command("""
-                    UPDATE inventory SET quantity=quantity-%s
-                    WHERE itemid=%s AND expirationdate=%s AND cost_per_unit=%s AND quantity>=%s
-                """, (take, int(itemid), row['expirationdate'], row['cost_per_unit'], take))
-                left -= take
-            if left <= 0:
-                break
-        return qty - left
-
-    def set_shelf_quantity(self, itemid, locid, qty):
-        exists = self.fetch_data("SELECT quantity FROM shelf WHERE itemid=%s AND locid=%s",
-                                 (int(itemid), locid))
-        if exists.empty:
-            if qty > 0:
-                self.execute_command("""
-                    INSERT INTO shelf (itemid, expirationdate, quantity, cost_per_unit, locid)
-                    VALUES (%s, CURRENT_DATE, %s, 0, %s)
-                """, (int(itemid), qty, locid))
-        else:
-            if qty > 0:
-                self.execute_command("""
-                    UPDATE shelf SET quantity=%s WHERE itemid=%s AND locid=%s
-                """, (qty, int(itemid), locid))
-            else:
-                self.execute_command("DELETE FROM shelf WHERE itemid=%s AND locid=%s",
-                                     (int(itemid), locid))
-
-    def get_items_at_location(self, locid):
+    # Historical locids where this item ever had an entry (for map highlight/defaults)
+    def get_item_locations(self, itemid):
         df = self.fetch_data("""
-            SELECT i.itemid, i.itemnameenglish AS name, i.barcode, s.quantity
-            FROM shelf s
-            JOIN item i ON s.itemid = i.itemid
-            WHERE s.locid = %s AND s.quantity > 0
-            ORDER BY i.itemnameenglish
-        """, (locid,))
-        return df if not df.empty else pd.DataFrame(columns=["itemid", "name", "barcode", "quantity"])
+            SELECT DISTINCT locid
+            FROM shelfentries
+            WHERE itemid=%s AND locid IS NOT NULL AND locid <> ''
+            ORDER BY locid
+        """, (int(itemid),))
+        return df["locid"].tolist() if not df.empty else []
+
+    # Insert a new declaration row (append-only)
+    def insert_declaration(self, itemid, locid, qty, who="Unknown"):
+        # expirationdate is NOT NULL in your schema; using CURRENT_DATE here.
+        # entrydate/created_at/createdby default are handled by your table defaults.
+        self.execute_command("""
+            INSERT INTO shelfentries
+                (itemid, quantity, expirationdate, locid, trx_type, note, reference_id, reference_type)
+            VALUES
+                (%s, %s, CURRENT_DATE, %s, 'STOCKTAKE', 'declare', NULL, NULL)
+        """, (int(itemid), int(qty), str(locid)))
+
+    # Recent declarations at a location (for the bottom panel)
+    def get_recent_declarations_at_location(self, locid, limit=200):
+        df = self.fetch_data("""
+            SELECT
+                se.entryid,
+                se.itemid,
+                i.itemnameenglish AS name,
+                i.barcode,
+                se.quantity,
+                se.entrydate
+            FROM shelfentries se
+            JOIN item i ON i.itemid = se.itemid
+            WHERE se.locid = %s AND se.note = 'declare'
+            ORDER BY se.entrydate DESC, se.entryid DESC
+            LIMIT %s
+        """, (str(locid), int(limit)))
+        return df if not df.empty else pd.DataFrame(columns=["entryid", "itemid", "name", "barcode", "quantity", "entrydate"])
 
 # ---------------- STYLE ----------------
 st.markdown("""
@@ -243,16 +224,14 @@ def declare_logic(barcode, reset_callback):
     )
 
     # ---------- Data pulls ----------
-    shelf_entries = handler.get_shelf_entries(itemid)
-    inventory_total = handler.get_inventory_total(itemid)
+    # Historical locids for highlight (no shelf table anymore)
+    item_locs_history = handler.get_item_locations(itemid)
+    inventory_total = handler.get_inventory_total(itemid)  # read-only
     shelf_locs = map_handler.get_locations()  # FULL MAP
-
-    # shelves that currently contain this item (red)
-    highlight_locs = shelf_entries["locid"].tolist() if not shelf_entries.empty else []
 
     # ---------- MAP (click to select) ----------
     st.markdown("#### 🗺️ Click a shelf to select it")
-    deck = build_deck(shelf_locs, highlight_locs, st.session_state["picked_locid"])
+    deck = build_deck(shelf_locs, item_locs_history, st.session_state["picked_locid"])
     # IMPORTANT: on_select="rerun" to get click events; single-object selection
     event = st.pydeck_chart(
         deck,
@@ -267,10 +246,8 @@ def declare_logic(barcode, reset_callback):
         sel = getattr(event, "selection", None) or event.get("selection") if isinstance(event, dict) else None
         if sel:
             objs = sel.get("objects", {}) if isinstance(sel, dict) else {}
-            # keys are layer ids; we used id="shelves"
             picked_list = objs.get("shelves") or []
             if picked_list:
-                # payload may be {"object": {...}} or the object dict directly; handle both
                 first = picked_list[0]
                 data = first.get("object") if isinstance(first, dict) and "object" in first else first
                 locid_clicked = str(data.get("locid") or "")
@@ -280,28 +257,20 @@ def declare_logic(barcode, reset_callback):
         # If selection state format changes, fail gracefully without breaking UI
         pass
 
-    # ---------- Previous qty & chosen shelf ----------
-    prev_qty = 0
-    prev_locid = ""
-    if not shelf_entries.empty:
-        prev_locid = shelf_entries['locid'].iloc[0] if len(shelf_entries) == 1 else ""
-        prev_qty = int(shelf_entries['qty'].iloc[0]) if len(shelf_entries) == 1 else 0
-    else:
-        st.warning("No previous quantity declared for this item in the selling area.")
-
-    chosen_locid = st.session_state["picked_locid"] or prev_locid
+    # ---------- Chosen shelf ----------
+    chosen_locid = st.session_state["picked_locid"]
     if chosen_locid:
-        st.success(f"Current shelf for this item: **{chosen_locid}**")
+        st.success(f"Selected shelf: **{chosen_locid}**")
         st.caption("Click a different shelf to change.")
     else:
         st.info("Click a shelf on the map to select it. (You can still proceed without selection if you type a locid.)")
 
     # ---------- Quantity & actions ----------
-    st.info(f"**Previous quantity:** {prev_qty}  \n**Available in inventory:** {inventory_total}")
+    st.info(f"**Available in inventory (read-only):** {inventory_total}")
 
     new_qty = st.number_input(
         "Declare current selling area quantity",
-        min_value=0, value=prev_qty, step=1, key="declare_qty", label_visibility="visible"
+        min_value=0, value=0, step=1, key="declare_qty", label_visibility="visible"
     )
 
     # Fallback manual locid input if user wants to override
@@ -326,16 +295,14 @@ def declare_logic(barcode, reset_callback):
         if not final_locid:
             st.error("Please click a shelf on the map (or type a locid) before confirming.")
             return
+        if new_qty <= 0:
+            st.error("Quantity must be greater than zero to declare.")
+            return
 
-        diff = new_qty - prev_qty
-        if diff > 0:
-            reduced = handler.subtract_inventory(itemid, diff)
-            st.success(f"Inventory reduced by {reduced}.")
-        elif diff < 0:
-            st.info("Declared quantity is less than previous; updating shelf record only (no add-back).")
+        # Append-only: insert a new row into shelfentries
+        handler.insert_declaration(itemid=itemid, locid=final_locid, qty=new_qty)
 
-        handler.set_shelf_quantity(itemid, final_locid, new_qty)
-        st.success(f"Selling area quantity for '{item['name']}' at {final_locid} is now {new_qty}.")
+        st.success(f"Recorded declaration for '{item['name']}' at {final_locid} with quantity {new_qty}.")
 
         st.session_state["latest_declaration"] = {
             "itemid": itemid,
@@ -361,25 +328,27 @@ def show_latest_declaration_and_items():
             </div>""",
             unsafe_allow_html=True
         )
-        items_at_location = DeclareHandler().get_items_at_location(latest["locid"])
-        items_at_location = items_at_location[items_at_location["quantity"] > 0]
-        if not items_at_location.empty:
+        # Show recent declarations at this location (append-only history)
+        recents = DeclareHandler().get_recent_declarations_at_location(latest["locid"])
+        if not recents.empty:
             st.markdown(
-                f"<br/><b>All items at location <span style='color:#098A23'>{latest['locid']}</span>:</b>",
+                f"<br/><b>Recent declarations at location <span style='color:#098A23'>{latest['locid']}</span>:</b>",
                 unsafe_allow_html=True
             )
             st.dataframe(
-                items_at_location.rename(columns={
+                recents.rename(columns={
+                    "entryid": "Entry ID",
                     "itemid": "Item ID",
                     "name": "Item Name",
                     "barcode": "Barcode",
-                    "quantity": "Shelf Quantity"
+                    "quantity": "Declared Qty",
+                    "entrydate": "Entry Date"
                 }),
                 hide_index=True,
                 use_container_width=True
             )
         else:
-            st.info("No items currently in this shelf location.")
+            st.info("No declarations recorded yet for this shelf location.")
 
 # ---------------- TABS ----------------
 with tab1:
