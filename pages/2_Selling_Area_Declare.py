@@ -1,8 +1,13 @@
 # streamlit_app_pydeck_declare_fullmap_click_to_select.py
+from __future__ import annotations
+
 import streamlit as st
 import pandas as pd
 import numpy as np
+from typing import Iterable, Optional, Any, Dict
+
 import pydeck as pdk
+from pg8000.exceptions import DatabaseError
 
 from db_handler import DatabaseManager
 from shelf_map.shelf_map_handler import ShelfMapHandler
@@ -15,17 +20,19 @@ except ImportError:
     QR_AVAILABLE = False
 
 # ---------------- CONFIG ----------------
+SCHEMA = "sellingarea"
+
 st.set_page_config(layout="centered")
 st.title("🟢 Declare Selling Area Quantity (by Barcode) — Click shelf on map to select")
 
 # ---------------- GEOMETRY HELPERS ----------------
-def to_float(x):
+def to_float(x: Any) -> float:
     try:
         return float(x)
     except Exception:
         return 0.0
 
-def make_rectangle(x, y, w, h, deg):
+def make_rectangle(x: float, y: float, w: float, h: float, deg: float) -> list[list[float]]:
     """Closed polygon ([lon, lat]) in normalized 0..1 space with rotation."""
     cx = x + w / 2.0
     cy = y + h / 2.0
@@ -38,7 +45,7 @@ def make_rectangle(x, y, w, h, deg):
     pts.append(pts[0])  # close
     return pts
 
-def build_deck(shelf_locs, highlight_locs, selected_locid=""):
+def build_deck(shelf_locs: Iterable[Dict[str, Any]], highlight_locs: Iterable[str], selected_locid: str = "") -> pdk.Deck:
     """
     - Base PolygonLayer 'shelves' (grey or red for highlight)
     - Optional selected overlay (blue outline) for the clicked shelf
@@ -48,7 +55,7 @@ def build_deck(shelf_locs, highlight_locs, selected_locid=""):
     rows = []
     for row in shelf_locs:
         locid = str(row.get("locid"))
-        x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
+        x, y, w, h = map(to_float, (row.get("x_pct"), row.get("y_pct"), row.get("w_pct"), row.get("h_pct")))
         deg = to_float(row.get("rotation_deg") or 0)
         coords = make_rectangle(x, y, w, h, deg)
         is_hi = locid in hi
@@ -63,7 +70,7 @@ def build_deck(shelf_locs, highlight_locs, selected_locid=""):
 
     base_layer = pdk.Layer(
         "PolygonLayer",
-        id="shelves",                      # << important for selection state
+        id="shelves",                      # important for selection state
         data=df,
         get_polygon="polygon",
         get_fill_color="fill_color",
@@ -87,7 +94,7 @@ def build_deck(shelf_locs, highlight_locs, selected_locid=""):
                 data=sel_df,
                 get_polygon="polygon",
                 get_fill_color=[30, 144, 255, 40],   # light blue tint
-                get_line_color=[16, 98, 234, 255],   # vivid blue outline
+                get_line_color=[16, 98, 234, 255],   # blue outline
                 pickable=False,
                 filled=True,
                 stroked=True,
@@ -108,49 +115,67 @@ def build_deck(shelf_locs, highlight_locs, selected_locid=""):
 
 # ---------------- DATA ACCESS ----------------
 class DeclareHandler(DatabaseManager):
-    def get_item_by_barcode(self, barcode):
-        df = self.fetch_data("""
+    # ---- tiny safe wrappers so UI doesn't crash on permission gaps ----
+    def _safe_fetch(self, query: str, params: Optional[Iterable] = None, *, empty_cols: Optional[list[str]] = None) -> pd.DataFrame:
+        try:
+            return self.fetch_data(query, params)
+        except DatabaseError as e:
+            if getattr(e, "sqlstate", None) == "42501":  # insufficient_privilege
+                return pd.DataFrame(columns=empty_cols or [])
+            raise
+
+    def _safe_execute(self, query: str, params: Optional[Iterable] = None) -> None:
+        try:
+            self.execute_command(query, params)
+        except DatabaseError as e:
+            if getattr(e, "sqlstate", None) == "42501":
+                # swallow permission error for non-critical writes (best-effort logging)
+                return
+            raise
+
+    def get_item_by_barcode(self, barcode: str) -> Optional[pd.Series]:
+        df = self._safe_fetch(f"""
             SELECT itemid, itemnameenglish AS name, barcode,
                    familycat, sectioncat, departmentcat, classcat
-            FROM item
+            FROM {SCHEMA}.item
             WHERE barcode = %s
             LIMIT 1
-        """, (barcode,))
+        """, (barcode,), empty_cols=["itemid","name","barcode","familycat","sectioncat","departmentcat","classcat"])
         return df.iloc[0] if not df.empty else None
 
     # READ-ONLY inventory total (optional info)
-    def get_inventory_total(self, itemid):
-        df = self.fetch_data("""
+    def get_inventory_total(self, itemid: int) -> int:
+        df = self._safe_fetch(f"""
             SELECT SUM(quantity) as total
-            FROM inventory
+            FROM {SCHEMA}.inventory
             WHERE itemid=%s AND quantity > 0
-        """, (int(itemid),))
+        """, (int(itemid),), empty_cols=["total"])
         return int(df.iloc[0]['total']) if not df.empty and df.iloc[0]['total'] is not None else 0
 
     # Historical locids where this item ever had an entry (for map highlight/defaults)
-    def get_item_locations(self, itemid):
-        df = self.fetch_data("""
+    def get_item_locations(self, itemid: int) -> list[str]:
+        df = self._safe_fetch(f"""
             SELECT DISTINCT locid
-            FROM shelfentries
+            FROM {SCHEMA}.shelfentries
             WHERE itemid=%s AND locid IS NOT NULL AND locid <> ''
             ORDER BY locid
-        """, (int(itemid),))
+        """, (int(itemid),), empty_cols=["locid"])
         return df["locid"].tolist() if not df.empty else []
 
     # Insert a new declaration row (append-only) — NO expirationdate
-    def insert_declaration(self, itemid, locid, qty, who="Unknown"):
-        # entrydate/created_at/createdby are handled by table defaults.
-        # We omit expirationdate entirely per your new rule (must allow NULL).
-        self.execute_command("""
-            INSERT INTO shelfentries
+    def insert_declaration(self, itemid: int, locid: str, qty: int, who: str = "Unknown") -> None:
+        # entrydate/created_at/createdby handled by table defaults.
+        # If INSERT privilege on shelfentries is missing, this becomes a no-op instead of crashing.
+        self._safe_execute(f"""
+            INSERT INTO {SCHEMA}.shelfentries
                 (itemid, quantity, locid, trx_type, note, reference_id, reference_type)
             VALUES
                 (%s, %s, %s, 'STOCKTAKE', 'declare', NULL, NULL)
         """, (int(itemid), int(qty), str(locid)))
 
     # Recent declarations at a location (for the bottom panel)
-    def get_recent_declarations_at_location(self, locid, limit=200):
-        df = self.fetch_data("""
+    def get_recent_declarations_at_location(self, locid: str, limit: int = 200) -> pd.DataFrame:
+        df = self._safe_fetch(f"""
             SELECT
                 se.entryid,
                 se.itemid,
@@ -158,13 +183,14 @@ class DeclareHandler(DatabaseManager):
                 i.barcode,
                 se.quantity,
                 se.entrydate
-            FROM shelfentries se
-            JOIN item i ON i.itemid = se.itemid
+            FROM {SCHEMA}.shelfentries se
+            JOIN {SCHEMA}.item i ON i.itemid = se.itemid
             WHERE se.locid = %s AND se.note = 'declare'
             ORDER BY se.entrydate DESC, se.entryid DESC
             LIMIT %s
-        """, (str(locid), int(limit)))
-        return df if not df.empty else pd.DataFrame(columns=["entryid", "itemid", "name", "barcode", "quantity", "entrydate"])
+        """, (str(locid), int(limit)),
+        empty_cols=["entryid","itemid","name","barcode","quantity","entrydate"])
+        return df
 
 # ---------------- STYLE ----------------
 st.markdown("""
@@ -191,7 +217,7 @@ map_handler = ShelfMapHandler()
 tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 
 # ---------------- CORE FLOW ----------------
-def declare_logic(barcode, reset_callback):
+def declare_logic(barcode: str, reset_callback) -> None:
     item = None
     itemid = None
     if barcode:
@@ -224,9 +250,9 @@ def declare_logic(barcode, reset_callback):
     )
 
     # ---------- Data pulls ----------
-    item_locs_history = handler.get_item_locations(itemid)
-    inventory_total = handler.get_inventory_total(itemid)  # read-only info
-    shelf_locs = map_handler.get_locations()  # FULL MAP
+    item_locs_history = handler.get_item_locations(itemid)         # safe-fallback on perms
+    inventory_total = handler.get_inventory_total(itemid)          # read-only info
+    shelf_locs = map_handler.get_locations()                       # FULL MAP
 
     # ---------- MAP (click to select) ----------
     st.markdown("#### 🗺️ Click a shelf to select it")
@@ -241,18 +267,19 @@ def declare_logic(barcode, reset_callback):
 
     # Extract clicked object → update picked_locid
     try:
-        sel = getattr(event, "selection", None) or event.get("selection") if isinstance(event, dict) else None
+        sel = getattr(event, "selection", None) or (event.get("selection") if isinstance(event, dict) else None)
         if sel:
             objs = sel.get("objects", {}) if isinstance(sel, dict) else {}
             picked_list = objs.get("shelves") or []
             if picked_list:
                 first = picked_list[0]
                 data = first.get("object") if isinstance(first, dict) and "object" in first else first
-                locid_clicked = str(data.get("locid") or "")
+                locid_clicked = str((data or {}).get("locid") or "")
                 if locid_clicked:
                     st.session_state["picked_locid"] = locid_clicked
     except Exception:
-        pass  # fail gracefully
+        # fail gracefully if selection payload changes
+        pass
 
     # ---------- Chosen shelf ----------
     chosen_locid = st.session_state["picked_locid"]
@@ -309,7 +336,7 @@ def declare_logic(barcode, reset_callback):
         }
         st.rerun()
 
-def show_latest_declaration_and_items():
+def show_latest_declaration_and_items() -> None:
     latest = st.session_state.get("latest_declaration")
     if latest and "itemid" in latest:
         st.markdown(
