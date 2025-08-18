@@ -16,3 +16,5 @@ matplotlib
 streamlit-qrcode-scanner
 streamlit-plotly-events
 pydeck
+cloud-sql-python-connector[pg8000]
+pg8000
