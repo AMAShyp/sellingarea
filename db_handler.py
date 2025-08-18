@@ -5,6 +5,7 @@ import streamlit as st
 
 # Cloud SQL Python Connector (PostgreSQL via pg8000)
 from google.cloud.sql.connector import Connector
+from google.oauth2 import service_account  # ← explicit creds for off-GCP
 import pg8000  # ensure driver is installed
 
 
@@ -26,23 +27,35 @@ def get_conn(cfg: dict, key: str):
 
     Expected cfg keys:
       - instance_connection_name: "PROJECT:REGION:INSTANCE"
-      - user: "postgres" (or your DB user)
-      - password: raw password string (NO URL encoding)
+      - user: DB user (e.g. "postgres")
+      - password: raw DB password (NO URL encoding)
       - db: database name
+    Also expects either:
+      - st.secrets["gcp_service_account"] block with a service account JSON
+        OR
+      - GOOGLE_APPLICATION_CREDENTIALS env var pointing to a key file
     """
-    connector = Connector()  # manages secure auth & ephemeral IPs
+    # Load explicit credentials if provided in Streamlit secrets
+    creds = None
+    if "gcp_service_account" in st.secrets:
+        creds = service_account.Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"])
+        )
+
+    # If creds is None and ADC is configured via env, Connector will pick it up.
+    connector = Connector(credentials=creds) if creds else Connector()
 
     def _connect():
         conn = connector.connect(
             cfg["instance_connection_name"],
             "pg8000",
             user=cfg["user"],
-            password=cfg["password"],  # no URL-encoding here
+            password=cfg["password"],
             db=cfg["db"],
-            timeout=10,                # connect timeout (seconds)
-            enable_iam_auth=False,     # set True only if using IAM DB auth
+            timeout=10,            # connect timeout (seconds)
+            enable_iam_auth=False, # using DB password auth (not IAM DB Auth)
         )
-        # Set a per-session statement timeout (5s) so no query can hang the UI
+        # Per-session statement timeout (5s) so no query can hang the UI
         cur = conn.cursor()
         try:
             cur.execute("SET statement_timeout = 5000;")
@@ -63,13 +76,11 @@ def get_conn(cfg: dict, key: str):
                 connector.close()
             except Exception:
                 pass
-
         st.on_session_end(_cleanup)
     except Exception:
         pass
 
-    # Also expose connector on the connection for manual cleanup if ever needed
-    conn._cloudsql_connector = connector  # nosec - internal use
+    conn._cloudsql_connector = connector  # optional handle
     return conn
 
 
@@ -80,7 +91,7 @@ class DatabaseManager:
     """General DB interactions using a cached connection (Cloud SQL Connector)."""
 
     def __init__(self):
-        # Prefer env vars in Cloud Run; fallback to Streamlit secrets.
+        # Prefer env vars (Cloud Run/App Engine); fallback to Streamlit secrets.
         cfg = {
             "instance_connection_name": os.getenv(
                 "INSTANCE_CONNECTION_NAME",
@@ -90,7 +101,6 @@ class DatabaseManager:
             "password": os.getenv("DB_PASSWORD", st.secrets["cloudsql"]["password"]),
             "db": os.getenv("DB_NAME", st.secrets["cloudsql"]["db"]),
         }
-
         self.cfg = cfg
         self._key = _session_key()
         self.conn = get_conn(self.cfg, self._key)  # cached per user session
