@@ -1,12 +1,15 @@
 import os
 import uuid
 import pandas as pd
-import psycopg2
-from psycopg2 import OperationalError
 import streamlit as st
 
+# Cloud SQL Python Connector (PostgreSQL via pg8000)
+from google.cloud.sql.connector import Connector
+import pg8000  # needed for the driver, even though we don't call it directly
+
+
 # ───────────────────────────────────────────────────────────────
-# 1) One cached connection per user session
+# 1) One cached Connector + connection per user session
 # ───────────────────────────────────────────────────────────────
 def _session_key() -> str:
     """Return a unique key for the current user session."""
@@ -16,56 +19,92 @@ def _session_key() -> str:
 
 
 @st.cache_resource(show_spinner=False)
-def get_conn(dsn: str, key: str):
+def get_conn(cfg: dict, key: str):
     """
-    Create (once per session) and return a PostgreSQL connection.
-    Adds TCP keepalives to survive brief network hiccups.
+    Create (once per session) and return a PostgreSQL connection using
+    the Cloud SQL Python Connector with the pg8000 driver.
+
+    Expected cfg keys:
+      - instance_connection_name: "PROJECT:REGION:INSTANCE"
+      - user: "postgres" (or your DB user)
+      - password: raw password string (NO URL encoding)
+      - db: database name
     """
-    conn = psycopg2.connect(
-        dsn,
-        keepalives=1,
-        keepalives_idle=30,
-        keepalives_interval=10,
-        keepalives_count=5,
-    )
+    connector = Connector()  # manages secure auth & ephemeral IPs
+
+    def _connect():
+        return connector.connect(
+            cfg["instance_connection_name"],
+            "pg8000",
+            user=cfg["user"],
+            password=cfg["password"],  # no URL-encoding here
+            db=cfg["db"],
+            enable_iam_auth=False,     # set True only if using IAM DB auth
+        )
+
+    conn = _connect()
+
+    # Clean up both connection and connector when the Streamlit session ends
     try:
-        st.on_session_end(conn.close)
+        def _cleanup():
+            try:
+                conn.close()
+            except Exception:
+                pass
+            try:
+                connector.close()
+            except Exception:
+                pass
+
+        st.on_session_end(_cleanup)
     except Exception:
         pass
+
     return conn
+
 
 # ───────────────────────────────────────────────────────────────
 # 2) Database manager with auto-reconnect logic
 # ───────────────────────────────────────────────────────────────
 class DatabaseManager:
-    """General DB interactions using a cached connection."""
+    """General DB interactions using a cached connection (Cloud SQL Connector)."""
 
     def __init__(self):
-        # Prefer env var override; fallback to Streamlit secrets.
-        self.dsn  = os.getenv("DATABASE_URL", st.secrets["neon"]["dsn"])
+        # Prefer env vars in Cloud Run; fallback to Streamlit secrets.
+        cfg = {
+            "instance_connection_name": os.getenv(
+                "INSTANCE_CONNECTION_NAME",
+                st.secrets["cloudsql"]["instance_connection_name"],
+            ),
+            "user": os.getenv("DB_USER", st.secrets["cloudsql"]["user"]),
+            "password": os.getenv("DB_PASSWORD", st.secrets["cloudsql"]["password"]),
+            "db": os.getenv("DB_NAME", st.secrets["cloudsql"]["db"]),
+        }
+
+        self.cfg = cfg
         self._key = _session_key()
-        self.conn = get_conn(self.dsn, self._key)  # reuse within this session
+        self.conn = get_conn(self.cfg, self._key)  # cached per user session
 
     # ────────── internal helpers ──────────
+    def _reconnect(self):
+        """Force a reconnection by clearing the cached resource and re-calling it."""
+        try:
+            get_conn.clear()
+        except Exception:
+            pass
+        self.conn = get_conn(self.cfg, self._key)
+
     def _ensure_live_conn(self):
         """
-        Ensure we have a live connection:
-          - If closed → reconnect
-          - Else, ping with SELECT 1; on failure → reconnect
+        Ensure we have a live connection. Try a quick ping; if it fails, reconnect.
         """
-        # psycopg2: .closed == 0 means open; >0 means closed
-        if getattr(self.conn, "closed", 1) != 0:
-            get_conn.clear()
-            self.conn = get_conn(self.dsn, self._key)
-            return
-
         try:
             with self.conn.cursor() as cur:
                 cur.execute("SELECT 1")
-        except OperationalError:
-            # connection dropped; rebuild the cached resource
-            get_conn.clear()
-            self.conn = get_conn(self.dsn, self._key)
+                _ = cur.fetchone()
+        except Exception:
+            # Stale/broken connection → rebuild
+            self._reconnect()
 
     def _fetch_df(self, query: str, params=None) -> pd.DataFrame:
         self._ensure_live_conn()
@@ -73,19 +112,16 @@ class DatabaseManager:
             with self.conn.cursor() as cur:
                 cur.execute(query, params or ())
                 rows = cur.fetchall()
-                cols = [c[0] for c in cur.description]
-        except OperationalError:
-            # transient conn issue → reconnect once and retry
-            get_conn.clear()
-            self.conn = get_conn(self.dsn, self._key)
+                cols = [c[0] for c in cur.description] if cur.description else []
+            return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame()
+        except Exception:
+            # On any driver/connector hiccup → one reconnect + retry once
+            self._reconnect()
             with self.conn.cursor() as cur:
                 cur.execute(query, params or ())
                 rows = cur.fetchall()
-                cols = [c[0] for c in cur.description]
-        except Exception:
-            self.conn.rollback()  # recover from broken transaction
-            raise
-        return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame()
+                cols = [c[0] for c in cur.description] if cur.description else []
+            return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame()
 
     def _execute(self, query: str, params=None, returning=False):
         self._ensure_live_conn()
@@ -95,18 +131,14 @@ class DatabaseManager:
                 res = cur.fetchone() if returning else None
             self.conn.commit()
             return res
-        except OperationalError:
-            # transient conn issue → reconnect once and retry
-            get_conn.clear()
-            self.conn = get_conn(self.dsn, self._key)
+        except Exception:
+            # Reconnect and retry once
+            self._reconnect()
             with self.conn.cursor() as cur:
                 cur.execute(query, params or ())
                 res = cur.fetchone() if returning else None
             self.conn.commit()
             return res
-        except Exception:
-            self.conn.rollback()  # reset failed transaction
-            raise
 
     # ────────── public API ──────────
     def fetch_data(self, query, params=None):
@@ -145,8 +177,7 @@ class DatabaseManager:
     def check_foreign_key_references(self, referenced_table: str, referenced_column: str, value) -> list[str]:
         """
         Return a list of tables that still reference the given value
-        through a FOREIGN KEY constraint.
-        Empty list → safe to delete.
+        through a FOREIGN KEY constraint. Empty list → safe to delete.
         """
         fk_sql = """
             SELECT tc.table_schema,
