@@ -39,11 +39,6 @@ def make_rectangle(x, y, w, h, deg):
     return pts
 
 def build_deck(shelf_locs, highlight_locs, selected_locid=""):
-    """
-    - Base PolygonLayer 'shelves' (grey or red for highlight)
-    - Optional selected overlay (blue outline) for the clicked shelf
-    - Tooltip shows a single-line label
-    """
     hi = set(map(str, highlight_locs))
     rows = []
     for row in shelf_locs:
@@ -63,7 +58,7 @@ def build_deck(shelf_locs, highlight_locs, selected_locid=""):
 
     base_layer = pdk.Layer(
         "PolygonLayer",
-        id="shelves",                      # << important for selection state
+        id="shelves",
         data=df,
         get_polygon="polygon",
         get_fill_color="fill_color",
@@ -77,7 +72,6 @@ def build_deck(shelf_locs, highlight_locs, selected_locid=""):
 
     layers = [base_layer]
 
-    # Optional selected overlay (blue outline + semi-transparent fill)
     if selected_locid:
         sel_df = df[df["locid"] == str(selected_locid)]
         if not sel_df.empty:
@@ -86,8 +80,8 @@ def build_deck(shelf_locs, highlight_locs, selected_locid=""):
                 id="selected-outline",
                 data=sel_df,
                 get_polygon="polygon",
-                get_fill_color=[30, 144, 255, 40],   # light blue tint
-                get_line_color=[16, 98, 234, 255],   # vivid blue outline
+                get_fill_color=[30, 144, 255, 40],
+                get_line_color=[16, 98, 234, 255],
                 pickable=False,
                 filled=True,
                 stroked=True,
@@ -95,7 +89,9 @@ def build_deck(shelf_locs, highlight_locs, selected_locid=""):
             )
             layers.append(sel_layer)
 
-    view_state = pdk.ViewState(longitude=0.5, latitude=0.5, zoom=6, min_zoom=4, max_zoom=20, pitch=0, bearing=0)
+    view_state = pdk.ViewState(
+        longitude=0.5, latitude=0.5, zoom=6, min_zoom=4, max_zoom=20, pitch=0, bearing=0
+    )
 
     deck = pdk.Deck(
         layers=layers,
@@ -118,7 +114,6 @@ class DeclareHandler(DatabaseManager):
         """, (barcode,))
         return df.iloc[0] if not df.empty else None
 
-    # READ-ONLY inventory total (optional info)
     def get_inventory_total(self, itemid):
         df = self.fetch_data("""
             SELECT SUM(quantity) as total
@@ -127,7 +122,6 @@ class DeclareHandler(DatabaseManager):
         """, (int(itemid),))
         return int(df.iloc[0]['total']) if not df.empty and df.iloc[0]['total'] is not None else 0
 
-    # Historical locids where this item ever had an entry (for map highlight/defaults)
     def get_item_locations(self, itemid):
         df = self.fetch_data("""
             SELECT DISTINCT locid
@@ -137,10 +131,7 @@ class DeclareHandler(DatabaseManager):
         """, (int(itemid),))
         return df["locid"].tolist() if not df.empty else []
 
-    # Insert a new declaration row (append-only) — NO expirationdate
     def insert_declaration(self, itemid, locid, qty, who="Unknown"):
-        # entrydate/created_at/createdby are handled by table defaults.
-        # We omit expirationdate entirely per your new rule (must allow NULL).
         self.execute_command("""
             INSERT INTO shelfentries
                 (itemid, quantity, locid, trx_type, note, reference_id, reference_type)
@@ -148,7 +139,6 @@ class DeclareHandler(DatabaseManager):
                 (%s, %s, %s, 'STOCKTAKE', 'declare', NULL, NULL)
         """, (int(itemid), int(qty), str(locid)))
 
-    # Recent declarations at a location (for the bottom panel)
     def get_recent_declarations_at_location(self, locid, limit=200):
         df = self.fetch_data("""
             SELECT
@@ -183,15 +173,28 @@ st.markdown("""
 # ---------------- STATE ----------------
 st.session_state.setdefault("latest_declaration", {})
 st.session_state.setdefault("latest_itemid", None)
-st.session_state.setdefault("picked_locid", "")  # updated by map clicks
+st.session_state.setdefault("picked_locid", "")
+st.session_state.setdefault("scanned_barcode", "")
+st.session_state.setdefault("consumed_scan", False)
 
 handler = DeclareHandler()
 map_handler = ShelfMapHandler()
 
+# Cache the (usually static) shelf geometry for smoother runs
+@st.cache_data(show_spinner=False, ttl=300)
+def _get_shelf_locs_cached():
+    return map_handler.get_locations()
+
 tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 
 # ---------------- CORE FLOW ----------------
-def declare_logic(barcode, reset_callback):
+def declare_logic(barcode: str):
+    # Debounce scanner/text input to avoid repeat triggers
+    if barcode and not st.session_state["consumed_scan"]:
+        st.session_state["scanned_barcode"] = barcode.strip()
+        st.session_state["consumed_scan"] = True
+    barcode = st.session_state["scanned_barcode"]
+
     item = None
     itemid = None
     if barcode:
@@ -199,17 +202,19 @@ def declare_logic(barcode, reset_callback):
         if item is not None:
             itemid = int(item['itemid'])
 
-    # Reset message when switching items
+    # Reset per-item session when barcode changed
     if itemid and st.session_state["latest_itemid"] != itemid:
         st.session_state["latest_declaration"] = {}
         st.session_state["latest_itemid"] = itemid
-        st.session_state["picked_locid"] = ""  # clear previous selection
+        st.session_state["picked_locid"] = ""
+        # Also reset the quantity field for this item
+        st.session_state["declare_qty"] = 0
 
     if not barcode:
         st.info("Please scan or enter the item barcode.")
         return
 
-    if item is None and barcode.strip():
+    if item is None:
         st.error("❌ Barcode not found in the item table.")
         return
 
@@ -225,34 +230,34 @@ def declare_logic(barcode, reset_callback):
 
     # ---------- Data pulls ----------
     item_locs_history = handler.get_item_locations(itemid)
-    inventory_total = handler.get_inventory_total(itemid)  # read-only info
-    shelf_locs = map_handler.get_locations()  # FULL MAP
+    inventory_total = handler.get_inventory_total(itemid)
+    shelf_locs = _get_shelf_locs_cached()
 
     # ---------- MAP (click to select) ----------
     st.markdown("#### 🗺️ Click a shelf to select it")
+
     deck = build_deck(shelf_locs, item_locs_history, st.session_state["picked_locid"])
+
+    # IMPORTANT: do NOT autotrigger reruns on selection — prevents infinite loops
     event = st.pydeck_chart(
         deck,
         use_container_width=True,
-        on_select="rerun",
-        selection_mode="single-object",
         key="main_shelf_map",
     )
 
-    # Extract clicked object → update picked_locid
+    # Try to read the selection once when user clicks, without forcing reruns
     try:
-        sel = getattr(event, "selection", None) or event.get("selection") if isinstance(event, dict) else None
-        if sel:
-            objs = sel.get("objects", {}) if isinstance(sel, dict) else {}
-            picked_list = objs.get("shelves") or []
+        sel = getattr(event, "selection", None)
+        if isinstance(sel, dict):
+            picked_list = sel.get("objects", {}).get("shelves") or []
             if picked_list:
                 first = picked_list[0]
                 data = first.get("object") if isinstance(first, dict) and "object" in first else first
-                locid_clicked = str(data.get("locid") or "")
+                locid_clicked = str((data or {}).get("locid") or "")
                 if locid_clicked:
                     st.session_state["picked_locid"] = locid_clicked
     except Exception:
-        pass  # fail gracefully
+        pass  # fully silent, no debug spam
 
     # ---------- Chosen shelf ----------
     chosen_locid = st.session_state["picked_locid"]
@@ -267,7 +272,7 @@ def declare_logic(barcode, reset_callback):
 
     new_qty = st.number_input(
         "Declare current selling area quantity",
-        min_value=0, value=0, step=1, key="declare_qty", label_visibility="visible"
+        min_value=0, value=st.session_state.get("declare_qty", 0), step=1, key="declare_qty", label_visibility="visible"
     )
 
     manual_locid = st.text_input(
@@ -279,13 +284,25 @@ def declare_logic(barcode, reset_callback):
     ).strip()
     final_locid = manual_locid or chosen_locid
 
-    c1, c2 = st.columns([2, 1])
+    c1, c2, c3 = st.columns([2, 1, 1])
     confirm_clicked = c1.button("✅ Confirm Declaration", key="btn_confirm_declaration")
-    if c2.button("🔄 New Scan", key="btn_new_scan"):
-        for k in ["barcode_cam", "barcode_input", "declare_qty", "declare_locid_text"]:
-            st.session_state.pop(k, None)
+    new_scan_clicked = c2.button("🔄 New Scan", key="btn_new_scan")
+    clear_sel_clicked = c3.button("🧹 Clear Shelf", key="btn_clear_shelf")
+
+    if clear_sel_clicked:
         st.session_state["picked_locid"] = ""
-        st.rerun()
+        st.session_state["declare_locid_text"] = ""
+        st.toast("Shelf selection cleared.", icon="🧹")
+
+    if new_scan_clicked:
+        # Reset scan consumption and fields, but no rerun storms
+        st.session_state["scanned_barcode"] = ""
+        st.session_state["consumed_scan"] = False
+        st.session_state["picked_locid"] = ""
+        st.session_state["declare_qty"] = 0
+        st.session_state["declare_locid_text"] = ""
+        st.info("Ready for the next scan.")
+        return
 
     if confirm_clicked:
         if not final_locid:
@@ -295,11 +312,13 @@ def declare_logic(barcode, reset_callback):
             st.error("Quantity must be greater than zero to declare.")
             return
 
-        # Append-only: insert a new row into shelfentries (NO expirationdate)
-        handler.insert_declaration(itemid=itemid, locid=final_locid, qty=new_qty)
+        try:
+            handler.insert_declaration(itemid=itemid, locid=final_locid, qty=new_qty)
+        except Exception as e:
+            st.error(f"Database error while saving declaration: {e}")
+            return
 
         st.success(f"Recorded declaration for '{item['name']}' at {final_locid} with quantity {new_qty}.")
-
         st.session_state["latest_declaration"] = {
             "itemid": itemid,
             "itemname": item['name'],
@@ -307,7 +326,13 @@ def declare_logic(barcode, reset_callback):
             "locid": final_locid,
             "qty": new_qty
         }
-        st.rerun()
+
+        # Prepare for next scan without forcing a rerun storm
+        st.session_state["consumed_scan"] = False
+        st.session_state["scanned_barcode"] = ""
+        st.session_state["declare_qty"] = 0
+        st.session_state["declare_locid_text"] = ""
+        st.session_state["picked_locid"] = ""
 
 def show_latest_declaration_and_items():
     latest = st.session_state.get("latest_declaration")
@@ -352,15 +377,15 @@ with tab1:
             "<div class='scan-hint'>Aim the barcode at your phone or webcam for instant detection.<br>Hold steady and close to the lens.</div>",
             unsafe_allow_html=True
         )
-        barcode = qrcode_scanner(key="barcode_cam") or ""
-        if barcode:
-            st.success(f"Scanned: {barcode}")
-        declare_logic(barcode, reset_callback=lambda: None)
+        scan_val = qrcode_scanner(key="barcode_cam") or ""
+        if scan_val and not st.session_state["consumed_scan"]:
+            st.success(f"Scanned: {scan_val}")
+        declare_logic(scan_val)
     else:
         st.warning("Camera scanning not available. Please use tab 2 or pip install streamlit-qrcode-scanner.")
 
 with tab2:
-    barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32, label_visibility="visible")
-    declare_logic(barcode, reset_callback=lambda: None)
+    typed = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32, label_visibility="visible")
+    declare_logic(typed)
 
 show_latest_declaration_and_items()
