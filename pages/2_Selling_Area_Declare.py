@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import pydeck as pdk
+import time, uuid, hashlib, traceback
 
 from db_handler import DatabaseManager
 from shelf_map.shelf_map_handler import ShelfMapHandler
@@ -17,6 +18,38 @@ except ImportError:
 # ---------------- CONFIG ----------------
 st.set_page_config(layout="centered")
 st.title("🟢 Declare Selling Area Quantity (by Barcode) — Click shelf on map to select")
+
+# ---------------- DEBUG TOOLS ----------------
+def _now_ms():
+    return int(time.time() * 1000)
+
+def _add_log(msg: str):
+    st.session_state.setdefault("_debug_log", [])
+    st.session_state["_debug_log"].append({"t": _now_ms(), "msg": msg})
+
+def _hash_submit(itemid, locid, qty):
+    s = f"{itemid}|{locid}|{qty}"
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
+
+def _debug_panel():
+    st.sidebar.markdown("### 🧪 Debug")
+    show = st.sidebar.checkbox("Show debug panel", value=True)
+    if not show:
+        return
+    with st.sidebar.expander("Recent log", expanded=True):
+        logs = st.session_state.get("_debug_log", [])[-50:]
+        if not logs:
+            st.write("— no logs yet —")
+        else:
+            st.code("\n".join([f"{i+1:02d}. {e['t']}  {e['msg']}" for i, e in enumerate(logs)]))
+    with st.sidebar.expander("Last DB error"):
+        err = st.session_state.get("_last_db_error")
+        st.write(err or "— none —")
+    with st.sidebar.expander("Last selection event (raw)"):
+        st.json(st.session_state.get("_last_selection_event") or {})
+    with st.sidebar.expander("Session state (keys)"):
+        keys = sorted(list(st.session_state.keys()))
+        st.write(keys)
 
 # ---------------- GEOMETRY HELPERS ----------------
 def to_float(x):
@@ -39,6 +72,11 @@ def make_rectangle(x, y, w, h, deg):
     return pts
 
 def build_deck(shelf_locs, highlight_locs, selected_locid=""):
+    """
+    - Base PolygonLayer 'shelves' (grey or red for highlight)
+    - Optional selected overlay (blue outline) for the clicked shelf
+    - Tooltip shows a single-line label
+    """
     hi = set(map(str, highlight_locs))
     rows = []
     for row in shelf_locs:
@@ -72,6 +110,7 @@ def build_deck(shelf_locs, highlight_locs, selected_locid=""):
 
     layers = [base_layer]
 
+    # Optional selected overlay (blue outline + semi-transparent fill)
     if selected_locid:
         sel_df = df[df["locid"] == str(selected_locid)]
         if not sel_df.empty:
@@ -104,43 +143,90 @@ def build_deck(shelf_locs, highlight_locs, selected_locid=""):
 
 # ---------------- DATA ACCESS ----------------
 class DeclareHandler(DatabaseManager):
+    def _fetch_timed(self, label, sql, params=None):
+        t0 = time.perf_counter()
+        try:
+            df = self.fetch_data(sql, params or ())
+            dt = (time.perf_counter() - t0) * 1000
+            _add_log(f"DB OK [{label}] {dt:.1f} ms")
+            return df
+        except Exception as e:
+            st.session_state["_last_db_error"] = f"[{label}] {e}\n" + traceback.format_exc()
+            _add_log(f"DB FAIL [{label}] -> see sidebar error")
+            st.error(f"Database error during **{label}**. Check the debug panel.")
+            return pd.DataFrame()
+
+    def _exec_timed(self, label, sql, params=None):
+        t0 = time.perf_counter()
+        try:
+            self.execute_command(sql, params or ())
+            dt = (time.perf_counter() - t0) * 1000
+            _add_log(f"DB OK [{label}] {dt:.1f} ms")
+            return True
+        except Exception as e:
+            st.session_state["_last_db_error"] = f"[{label}] {e}\n" + traceback.format_exc()
+            _add_log(f"DB FAIL [{label}] -> see sidebar error")
+            st.error(f"Database error during **{label}**. Check the debug panel.")
+            return False
+
     def get_item_by_barcode(self, barcode):
-        df = self.fetch_data("""
+        return self._fetch_timed(
+            "get_item_by_barcode",
+            """
             SELECT itemid, itemnameenglish AS name, barcode,
                    familycat, sectioncat, departmentcat, classcat
             FROM item
             WHERE barcode = %s
             LIMIT 1
-        """, (barcode,))
-        return df.iloc[0] if not df.empty else None
+            """,
+            (barcode,),
+        ).iloc[0] if not self._fetch_timed(
+            "get_item_by_barcode_count",
+            "SELECT 1 FROM item WHERE barcode=%s LIMIT 1",
+            (barcode,)
+        ).empty else None
 
     def get_inventory_total(self, itemid):
-        df = self.fetch_data("""
+        df = self._fetch_timed(
+            "get_inventory_total",
+            """
             SELECT SUM(quantity) as total
             FROM inventory
             WHERE itemid=%s AND quantity > 0
-        """, (int(itemid),))
+            """,
+            (int(itemid),),
+        )
         return int(df.iloc[0]['total']) if not df.empty and df.iloc[0]['total'] is not None else 0
 
     def get_item_locations(self, itemid):
-        df = self.fetch_data("""
+        df = self._fetch_timed(
+            "get_item_locations",
+            """
             SELECT DISTINCT locid
             FROM shelfentries
             WHERE itemid=%s AND locid IS NOT NULL AND locid <> ''
             ORDER BY locid
-        """, (int(itemid),))
+            """,
+            (int(itemid),),
+        )
         return df["locid"].tolist() if not df.empty else []
 
     def insert_declaration(self, itemid, locid, qty, who="Unknown"):
-        self.execute_command("""
+        return self._exec_timed(
+            "insert_declaration",
+            """
             INSERT INTO shelfentries
                 (itemid, quantity, locid, trx_type, note, reference_id, reference_type)
             VALUES
                 (%s, %s, %s, 'STOCKTAKE', 'declare', NULL, NULL)
-        """, (int(itemid), int(qty), str(locid)))
+            """,
+            (int(itemid), int(qty), str(locid)),
+        )
 
     def get_recent_declarations_at_location(self, locid, limit=200):
-        df = self.fetch_data("""
+        df = self._fetch_timed(
+            "get_recent_declarations_at_location",
+            """
             SELECT
                 se.entryid,
                 se.itemid,
@@ -153,7 +239,9 @@ class DeclareHandler(DatabaseManager):
             WHERE se.locid = %s AND se.note = 'declare'
             ORDER BY se.entrydate DESC, se.entryid DESC
             LIMIT %s
-        """, (str(locid), int(limit)))
+            """,
+            (str(locid), int(limit)),
+        )
         return df if not df.empty else pd.DataFrame(columns=["entryid", "itemid", "name", "barcode", "quantity", "entrydate"])
 
 # ---------------- STYLE ----------------
@@ -173,48 +261,45 @@ st.markdown("""
 # ---------------- STATE ----------------
 st.session_state.setdefault("latest_declaration", {})
 st.session_state.setdefault("latest_itemid", None)
-st.session_state.setdefault("picked_locid", "")
-st.session_state.setdefault("scanned_barcode", "")
-st.session_state.setdefault("consumed_scan", False)
+st.session_state.setdefault("picked_locid", "")  # updated by map clicks
+st.session_state.setdefault("_processed_tokens", set())
+st.session_state.setdefault("_last_submit_hash", None)
 
 handler = DeclareHandler()
 map_handler = ShelfMapHandler()
 
-# Cache the (usually static) shelf geometry for smoother runs
-@st.cache_data(show_spinner=False, ttl=300)
-def _get_shelf_locs_cached():
-    return map_handler.get_locations()
+_debug_panel()  # sidebar
 
 tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 
 # ---------------- CORE FLOW ----------------
-def declare_logic(barcode: str):
-    # Debounce scanner/text input to avoid repeat triggers
-    if barcode and not st.session_state["consumed_scan"]:
-        st.session_state["scanned_barcode"] = barcode.strip()
-        st.session_state["consumed_scan"] = True
-    barcode = st.session_state["scanned_barcode"]
-
+def declare_logic(barcode):
+    t_start = time.perf_counter()
     item = None
     itemid = None
     if barcode:
-        item = handler.get_item_by_barcode(barcode)
+        _add_log(f"Lookup barcode [{barcode}]")
+        try:
+            item = handler.get_item_by_barcode(barcode)
+        except Exception as e:
+            st.session_state["_last_db_error"] = f"lookup_fatal: {e}\n" + traceback.format_exc()
+            _add_log("Fatal in get_item_by_barcode")
+            item = None
         if item is not None:
             itemid = int(item['itemid'])
 
-    # Reset per-item session when barcode changed
+    # Reset message when switching items
     if itemid and st.session_state["latest_itemid"] != itemid:
         st.session_state["latest_declaration"] = {}
         st.session_state["latest_itemid"] = itemid
         st.session_state["picked_locid"] = ""
-        # Also reset the quantity field for this item
-        st.session_state["declare_qty"] = 0
+        _add_log(f"Switched to itemid {itemid}; cleared picked_locid.")
 
     if not barcode:
         st.info("Please scan or enter the item barcode.")
         return
 
-    if item is None:
+    if item is None and barcode.strip():
         st.error("❌ Barcode not found in the item table.")
         return
 
@@ -230,34 +315,51 @@ def declare_logic(barcode: str):
 
     # ---------- Data pulls ----------
     item_locs_history = handler.get_item_locations(itemid)
-    inventory_total = handler.get_inventory_total(itemid)
-    shelf_locs = _get_shelf_locs_cached()
+    inventory_total = handler.get_inventory_total(itemid)  # read-only info
+
+    # Pull full map
+    try:
+        shelf_locs = map_handler.get_locations()
+        _add_log(f"Loaded {len(shelf_locs)} shelf polygons")
+    except Exception as e:
+        st.session_state["_last_db_error"] = f"map_load: {e}\n" + traceback.format_exc()
+        _add_log("Map load failed")
+        shelf_locs = []
 
     # ---------- MAP (click to select) ----------
     st.markdown("#### 🗺️ Click a shelf to select it")
-
     deck = build_deck(shelf_locs, item_locs_history, st.session_state["picked_locid"])
 
-    # IMPORTANT: do NOT autotrigger reruns on selection — prevents infinite loops
+    # NOTE: to avoid infinite reruns, we DO NOT auto-rerun on selection.
+    # We'll just read the selection object if present.
     event = st.pydeck_chart(
         deck,
         use_container_width=True,
         key="main_shelf_map",
     )
 
-    # Try to read the selection once when user clicks, without forcing reruns
+    # Try to read any selection info Streamlit may provide (future-proof)
+    raw_sel = getattr(event, "selection", None)
+    if raw_sel is None and isinstance(event, dict):
+        raw_sel = event.get("selection")
+    if raw_sel:
+        st.session_state["_last_selection_event"] = raw_sel
+
+    # Extract clicked object → update picked_locid safely
     try:
-        sel = getattr(event, "selection", None)
-        if isinstance(sel, dict):
-            picked_list = sel.get("objects", {}).get("shelves") or []
+        sel = raw_sel
+        if sel:
+            objs = sel.get("objects", {}) if isinstance(sel, dict) else {}
+            picked_list = objs.get("shelves") or []
             if picked_list:
                 first = picked_list[0]
                 data = first.get("object") if isinstance(first, dict) and "object" in first else first
                 locid_clicked = str((data or {}).get("locid") or "")
-                if locid_clicked:
+                if locid_clicked and locid_clicked != st.session_state.get("picked_locid"):
                     st.session_state["picked_locid"] = locid_clicked
-    except Exception:
-        pass  # fully silent, no debug spam
+                    _add_log(f"Picked locid via map: {locid_clicked}")
+    except Exception as e:
+        _add_log("Selection parse failed (ignored)")
 
     # ---------- Chosen shelf ----------
     chosen_locid = st.session_state["picked_locid"]
@@ -272,7 +374,7 @@ def declare_logic(barcode: str):
 
     new_qty = st.number_input(
         "Declare current selling area quantity",
-        min_value=0, value=st.session_state.get("declare_qty", 0), step=1, key="declare_qty", label_visibility="visible"
+        min_value=0, value=0, step=1, key="declare_qty", label_visibility="visible"
     )
 
     manual_locid = st.text_input(
@@ -284,55 +386,59 @@ def declare_logic(barcode: str):
     ).strip()
     final_locid = manual_locid or chosen_locid
 
-    c1, c2, c3 = st.columns([2, 1, 1])
+    # Submit guard values
+    submit_hash = _hash_submit(itemid, final_locid, new_qty)
+    st.caption(f"🧷 Submit hash: `{submit_hash}`")  # helpful in debug; remove if you prefer
+    st.session_state["_last_submit_hash"] = submit_hash
+
+    c1, c2 = st.columns([2, 1])
     confirm_clicked = c1.button("✅ Confirm Declaration", key="btn_confirm_declaration")
     new_scan_clicked = c2.button("🔄 New Scan", key="btn_new_scan")
-    clear_sel_clicked = c3.button("🧹 Clear Shelf", key="btn_clear_shelf")
-
-    if clear_sel_clicked:
-        st.session_state["picked_locid"] = ""
-        st.session_state["declare_locid_text"] = ""
-        st.toast("Shelf selection cleared.", icon="🧹")
 
     if new_scan_clicked:
-        # Reset scan consumption and fields, but no rerun storms
-        st.session_state["scanned_barcode"] = ""
-        st.session_state["consumed_scan"] = False
+        for k in ["barcode_cam", "barcode_input", "declare_qty", "declare_locid_text"]:
+            st.session_state.pop(k, None)
         st.session_state["picked_locid"] = ""
-        st.session_state["declare_qty"] = 0
-        st.session_state["declare_locid_text"] = ""
-        st.info("Ready for the next scan.")
-        return
+        _add_log("New Scan clicked: cleared inputs & picked_locid.")
+        st.experimental_rerun()
 
     if confirm_clicked:
+        _add_log("Confirm clicked")
         if not final_locid:
             st.error("Please click a shelf on the map (or type a locid) before confirming.")
+            _add_log("Decline: missing locid")
             return
         if new_qty <= 0:
             st.error("Quantity must be greater than zero to declare.")
+            _add_log("Decline: qty <= 0")
             return
 
-        try:
-            handler.insert_declaration(itemid=itemid, locid=final_locid, qty=new_qty)
-        except Exception as e:
-            st.error(f"Database error while saving declaration: {e}")
-            return
+        token = str(uuid.uuid4())
+        processed = st.session_state["_processed_tokens"]
 
-        st.success(f"Recorded declaration for '{item['name']}' at {final_locid} with quantity {new_qty}.")
-        st.session_state["latest_declaration"] = {
-            "itemid": itemid,
-            "itemname": item['name'],
-            "barcode": item['barcode'],
-            "locid": final_locid,
-            "qty": new_qty
-        }
+        if submit_hash in processed:
+            st.warning("This exact declaration was already processed. Skipping duplicate submit.")
+            _add_log(f"Skip duplicate submit hash={submit_hash}")
+        else:
+            with st.spinner("Recording declaration..."):
+                ok = handler.insert_declaration(itemid=itemid, locid=final_locid, qty=new_qty)
+            if ok:
+                processed.add(submit_hash)
+                st.session_state["_processed_tokens"] = processed
+                st.success(f"Recorded declaration for '{item['name']}' at {final_locid} with quantity {new_qty}.")
+                st.session_state["latest_declaration"] = {
+                    "itemid": itemid,
+                    "itemname": item['name'],
+                    "barcode": item['barcode'],
+                    "locid": final_locid,
+                    "qty": new_qty
+                }
+                _add_log(f"Insert OK hash={submit_hash}")
+            else:
+                st.error("Could not record declaration (see debug panel).")
+                _add_log(f"Insert FAIL hash={submit_hash}")
 
-        # Prepare for next scan without forcing a rerun storm
-        st.session_state["consumed_scan"] = False
-        st.session_state["scanned_barcode"] = ""
-        st.session_state["declare_qty"] = 0
-        st.session_state["declare_locid_text"] = ""
-        st.session_state["picked_locid"] = ""
+    _add_log(f"declare_logic total {(time.perf_counter() - t_start)*1000:.1f} ms")
 
 def show_latest_declaration_and_items():
     latest = st.session_state.get("latest_declaration")
@@ -377,15 +483,15 @@ with tab1:
             "<div class='scan-hint'>Aim the barcode at your phone or webcam for instant detection.<br>Hold steady and close to the lens.</div>",
             unsafe_allow_html=True
         )
-        scan_val = qrcode_scanner(key="barcode_cam") or ""
-        if scan_val and not st.session_state["consumed_scan"]:
-            st.success(f"Scanned: {scan_val}")
-        declare_logic(scan_val)
+        barcode = qrcode_scanner(key="barcode_cam") or ""
+        if barcode:
+            st.success(f"Scanned: {barcode}")
+        declare_logic(barcode)
     else:
         st.warning("Camera scanning not available. Please use tab 2 or pip install streamlit-qrcode-scanner.")
 
 with tab2:
-    typed = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32, label_visibility="visible")
-    declare_logic(typed)
+    barcode = st.text_input("Scan or enter barcode", key="barcode_input", max_chars=32, label_visibility="visible")
+    declare_logic(barcode)
 
 show_latest_declaration_and_items()
