@@ -5,7 +5,7 @@ import streamlit as st
 
 # Cloud SQL Python Connector (PostgreSQL via pg8000)
 from google.cloud.sql.connector import Connector
-import pg8000  # needed for the driver, even though we don't call it directly
+import pg8000  # ensure driver is installed
 
 
 # ───────────────────────────────────────────────────────────────
@@ -33,14 +33,22 @@ def get_conn(cfg: dict, key: str):
     connector = Connector()  # manages secure auth & ephemeral IPs
 
     def _connect():
-        return connector.connect(
+        conn = connector.connect(
             cfg["instance_connection_name"],
             "pg8000",
             user=cfg["user"],
             password=cfg["password"],  # no URL-encoding here
             db=cfg["db"],
+            timeout=10,                # connect timeout (seconds)
             enable_iam_auth=False,     # set True only if using IAM DB auth
         )
+        # Set a per-session statement timeout (5s) so no query can hang the UI
+        cur = conn.cursor()
+        try:
+            cur.execute("SET statement_timeout = 5000;")
+        finally:
+            cur.close()
+        return conn
 
     conn = _connect()
 
@@ -60,6 +68,8 @@ def get_conn(cfg: dict, key: str):
     except Exception:
         pass
 
+    # Also expose connector on the connection for manual cleanup if ever needed
+    conn._cloudsql_connector = connector  # nosec - internal use
     return conn
 
 
@@ -96,12 +106,17 @@ class DatabaseManager:
 
     def _ensure_live_conn(self):
         """
-        Ensure we have a live connection. Try a quick ping; if it fails, reconnect.
+        Ensure we have a live connection. Quick ping; if it fails, reconnect.
         """
         try:
-            with self.conn.cursor() as cur:
-                cur.execute("SELECT 1")
+            cur = self.conn.cursor()
+            try:
+                # Make the ping return fast even if server is busy
+                cur.execute("SET LOCAL statement_timeout = 2000;")
+                cur.execute("SELECT 1;")
                 _ = cur.fetchone()
+            finally:
+                cur.close()
         except Exception:
             # Stale/broken connection → rebuild
             self._reconnect()
@@ -109,34 +124,51 @@ class DatabaseManager:
     def _fetch_df(self, query: str, params=None) -> pd.DataFrame:
         self._ensure_live_conn()
         try:
-            with self.conn.cursor() as cur:
+            cur = self.conn.cursor()
+            try:
+                # Per-query timeout safeguard (8s)
+                cur.execute("SET LOCAL statement_timeout = 8000;")
                 cur.execute(query, params or ())
                 rows = cur.fetchall()
                 cols = [c[0] for c in cur.description] if cur.description else []
+            finally:
+                cur.close()
             return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame()
         except Exception:
             # On any driver/connector hiccup → one reconnect + retry once
             self._reconnect()
-            with self.conn.cursor() as cur:
+            cur = self.conn.cursor()
+            try:
+                cur.execute("SET LOCAL statement_timeout = 8000;")
                 cur.execute(query, params or ())
                 rows = cur.fetchall()
                 cols = [c[0] for c in cur.description] if cur.description else []
+            finally:
+                cur.close()
             return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame()
 
     def _execute(self, query: str, params=None, returning=False):
         self._ensure_live_conn()
         try:
-            with self.conn.cursor() as cur:
+            cur = self.conn.cursor()
+            try:
+                cur.execute("SET LOCAL statement_timeout = 8000;")
                 cur.execute(query, params or ())
                 res = cur.fetchone() if returning else None
+            finally:
+                cur.close()
             self.conn.commit()
             return res
         except Exception:
             # Reconnect and retry once
             self._reconnect()
-            with self.conn.cursor() as cur:
+            cur = self.conn.cursor()
+            try:
+                cur.execute("SET LOCAL statement_timeout = 8000;")
                 cur.execute(query, params or ())
                 res = cur.fetchone() if returning else None
+            finally:
+                cur.close()
             self.conn.commit()
             return res
 
