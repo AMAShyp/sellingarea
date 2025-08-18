@@ -1,13 +1,10 @@
 # streamlit_app_pydeck_declare_fullmap_click_to_select.py
-from __future__ import annotations
+# Debuggable rewrite — surfaces DB user, schema, and table privileges when errors occur.
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-from typing import Iterable, Optional, Any, Dict
-
 import pydeck as pdk
-from pg8000.exceptions import DatabaseError
 
 from db_handler import DatabaseManager
 from shelf_map.shelf_map_handler import ShelfMapHandler
@@ -19,20 +16,35 @@ try:
 except ImportError:
     QR_AVAILABLE = False
 
-# ---------------- CONFIG ----------------
-SCHEMA = "sellingarea"
+SCHEMA = "sellingarea"  # <-- adjust if your schema name differs
 
+# ---------------- CONFIG ----------------
 st.set_page_config(layout="centered")
 st.title("🟢 Declare Selling Area Quantity (by Barcode) — Click shelf on map to select")
 
+# ---------------- DEBUG CONTROLS ----------------
+DEBUG = st.toggle("Show Debug Info", value=False, help="Toggle on to see detailed DB diagnostics and SQL traces.")
+
+def debug_box(title: str, content: str | None = None):
+    if DEBUG:
+        with st.expander(f"🔎 {title}", expanded=True):
+            if content:
+                st.code(content, language="text")
+
+def debug_kv(title: str, **kv):
+    if DEBUG:
+        with st.expander(f"🔎 {title}", expanded=True):
+            for k, v in kv.items():
+                st.write(f"**{k}:** `{v}`")
+
 # ---------------- GEOMETRY HELPERS ----------------
-def to_float(x: Any) -> float:
+def to_float(x):
     try:
         return float(x)
     except Exception:
         return 0.0
 
-def make_rectangle(x: float, y: float, w: float, h: float, deg: float) -> list[list[float]]:
+def make_rectangle(x, y, w, h, deg):
     """Closed polygon ([lon, lat]) in normalized 0..1 space with rotation."""
     cx = x + w / 2.0
     cy = y + h / 2.0
@@ -45,7 +57,7 @@ def make_rectangle(x: float, y: float, w: float, h: float, deg: float) -> list[l
     pts.append(pts[0])  # close
     return pts
 
-def build_deck(shelf_locs: Iterable[Dict[str, Any]], highlight_locs: Iterable[str], selected_locid: str = "") -> pdk.Deck:
+def build_deck(shelf_locs, highlight_locs, selected_locid=""):
     """
     - Base PolygonLayer 'shelves' (grey or red for highlight)
     - Optional selected overlay (blue outline) for the clicked shelf
@@ -55,7 +67,7 @@ def build_deck(shelf_locs: Iterable[Dict[str, Any]], highlight_locs: Iterable[st
     rows = []
     for row in shelf_locs:
         locid = str(row.get("locid"))
-        x, y, w, h = map(to_float, (row.get("x_pct"), row.get("y_pct"), row.get("w_pct"), row.get("h_pct")))
+        x, y, w, h = map(to_float, (row["x_pct"], row["y_pct"], row["w_pct"], row["h_pct"]))
         deg = to_float(row.get("rotation_deg") or 0)
         coords = make_rectangle(x, y, w, h, deg)
         is_hi = locid in hi
@@ -70,7 +82,7 @@ def build_deck(shelf_locs: Iterable[Dict[str, Any]], highlight_locs: Iterable[st
 
     base_layer = pdk.Layer(
         "PolygonLayer",
-        id="shelves",                      # important for selection state
+        id="shelves",
         data=df,
         get_polygon="polygon",
         get_fill_color="fill_color",
@@ -94,7 +106,7 @@ def build_deck(shelf_locs: Iterable[Dict[str, Any]], highlight_locs: Iterable[st
                 data=sel_df,
                 get_polygon="polygon",
                 get_fill_color=[30, 144, 255, 40],   # light blue tint
-                get_line_color=[16, 98, 234, 255],   # blue outline
+                get_line_color=[16, 98, 234, 255],   # vivid blue outline
                 pickable=False,
                 filled=True,
                 stroked=True,
@@ -113,69 +125,127 @@ def build_deck(shelf_locs: Iterable[Dict[str, Any]], highlight_locs: Iterable[st
     )
     return deck
 
-# ---------------- DATA ACCESS ----------------
+# ---------------- DATA ACCESS + DIAGNOSTICS ----------------
 class DeclareHandler(DatabaseManager):
-    # ---- tiny safe wrappers so UI doesn't crash on permission gaps ----
-    def _safe_fetch(self, query: str, params: Optional[Iterable] = None, *, empty_cols: Optional[list[str]] = None) -> pd.DataFrame:
+    # Quick DB introspection to power debug panel
+    def whoami(self):
         try:
-            return self.fetch_data(query, params)
-        except DatabaseError as e:
-            if getattr(e, "sqlstate", None) == "42501":  # insufficient_privilege
-                return pd.DataFrame(columns=empty_cols or [])
+            df = self.fetch_data("SELECT current_user, session_user;")
+            cu = df.iloc[0]["current_user"] if not df.empty else None
+            su = df.iloc[0]["session_user"] if not df.empty else None
+        except Exception:
+            cu = su = None
+
+        try:
+            sp = self.fetch_data("SHOW search_path;")
+            search_path = sp.iloc[0][0] if not sp.empty else None
+        except Exception:
+            search_path = None
+
+        # Check privileges specifically for sellingarea.shelfentries
+        checks = {}
+        try:
+            q = """
+                SELECT
+                  has_table_privilege(%s, %s, 'SELECT')  AS can_select,
+                  has_table_privilege(%s, %s, 'INSERT')  AS can_insert,
+                  has_table_privilege(%s, %s, 'UPDATE')  AS can_update,
+                  has_table_privilege(%s, %s, 'DELETE')  AS can_delete
+            """
+            t = f"{SCHEMA}.shelfentries"
+            dfp = self.fetch_data(q, (cu, t, cu, t, cu, t, cu, t))
+            if not dfp.empty:
+                for col in dfp.columns:
+                    checks[col] = bool(dfp.iloc[0][col])
+        except Exception:
+            pass
+
+        return {"current_user": cu, "session_user": su, "search_path": search_path, "shelfentries_priv": checks}
+
+    def _debug_wrap_fetch(self, label: str, sql: str, params: tuple | None = None):
+        try:
+            if DEBUG:
+                debug_kv(f"SQL (fetch) — {label}", sql=sql, params=params)
+            return self.fetch_data(sql, params)
+        except Exception as e:
+            self._emit_db_error(label, sql, params, e)
             raise
 
-    def _safe_execute(self, query: str, params: Optional[Iterable] = None) -> None:
+    def _debug_wrap_exec(self, label: str, sql: str, params: tuple | None = None):
         try:
-            self.execute_command(query, params)
-        except DatabaseError as e:
-            if getattr(e, "sqlstate", None) == "42501":
-                # swallow permission error for non-critical writes (best-effort logging)
-                return
+            if DEBUG:
+                debug_kv(f"SQL (exec) — {label}", sql=sql, params=params)
+            return self.execute_command(sql, params)
+        except Exception as e:
+            self._emit_db_error(label, sql, params, e)
             raise
 
-    def get_item_by_barcode(self, barcode: str) -> Optional[pd.Series]:
-        df = self._safe_fetch(f"""
+    def _emit_db_error(self, label: str, sql: str, params, err: Exception):
+        info = self.whoami()
+        st.error(f"🚫 **Database error in `{label}`**")
+        if DEBUG:
+            debug_kv("DB Identity", **info)
+            debug_box("Failing SQL", sql)
+            debug_kv("Params", params=params)
+            debug_box("Exception", repr(err))
+
+        # Friendly suggestion when it's a permission error
+        msg = str(err).lower()
+        if "permission denied" in msg or "42501" in msg:
+            grant = f"""\
+-- Run as a superuser/owner. Replace app_user with your DB user:
+GRANT USAGE ON SCHEMA {SCHEMA} TO app_user;
+GRANT SELECT, INSERT ON TABLE {SCHEMA}.shelfentries TO app_user;"""
+            st.warning(
+                "Looks like a **permission** problem on "
+                f"`{SCHEMA}.shelfentries`. You’ll need to grant privileges to the app user."
+            )
+            debug_box("Suggested GRANTs", grant)
+
+    # -------------------- business queries --------------------
+    def get_item_by_barcode(self, barcode):
+        sql = f"""
             SELECT itemid, itemnameenglish AS name, barcode,
                    familycat, sectioncat, departmentcat, classcat
             FROM {SCHEMA}.item
             WHERE barcode = %s
             LIMIT 1
-        """, (barcode,), empty_cols=["itemid","name","barcode","familycat","sectioncat","departmentcat","classcat"])
+        """
+        df = self._debug_wrap_fetch("get_item_by_barcode", sql, (barcode,))
         return df.iloc[0] if not df.empty else None
 
-    # READ-ONLY inventory total (optional info)
-    def get_inventory_total(self, itemid: int) -> int:
-        df = self._safe_fetch(f"""
+    def get_inventory_total(self, itemid):
+        sql = f"""
             SELECT SUM(quantity) as total
             FROM {SCHEMA}.inventory
             WHERE itemid=%s AND quantity > 0
-        """, (int(itemid),), empty_cols=["total"])
+        """
+        df = self._debug_wrap_fetch("get_inventory_total", sql, (int(itemid),))
         return int(df.iloc[0]['total']) if not df.empty and df.iloc[0]['total'] is not None else 0
 
-    # Historical locids where this item ever had an entry (for map highlight/defaults)
-    def get_item_locations(self, itemid: int) -> list[str]:
-        df = self._safe_fetch(f"""
+    def get_item_locations(self, itemid):
+        # NOTE: this was the failing query in your trace
+        sql = f"""
             SELECT DISTINCT locid
             FROM {SCHEMA}.shelfentries
             WHERE itemid=%s AND locid IS NOT NULL AND locid <> ''
             ORDER BY locid
-        """, (int(itemid),), empty_cols=["locid"])
+        """
+        df = self._debug_wrap_fetch("get_item_locations", sql, (int(itemid),))
         return df["locid"].tolist() if not df.empty else []
 
-    # Insert a new declaration row (append-only) — NO expirationdate
-    def insert_declaration(self, itemid: int, locid: str, qty: int, who: str = "Unknown") -> None:
-        # entrydate/created_at/createdby handled by table defaults.
-        # If INSERT privilege on shelfentries is missing, this becomes a no-op instead of crashing.
-        self._safe_execute(f"""
+    def insert_declaration(self, itemid, locid, qty, who="Unknown"):
+        # Append-only: NO expirationdate
+        sql = f"""
             INSERT INTO {SCHEMA}.shelfentries
-                (itemid, quantity, locid, trx_type, note, reference_id, reference_type)
+                (itemid, quantity, locid, trx_type, note, reference_id, reference_type, createdby)
             VALUES
-                (%s, %s, %s, 'STOCKTAKE', 'declare', NULL, NULL)
-        """, (int(itemid), int(qty), str(locid)))
+                (%s, %s, %s, 'STOCKTAKE', 'declare', NULL, NULL, %s)
+        """
+        self._debug_wrap_exec("insert_declaration", sql, (int(itemid), int(qty), str(locid), str(who)))
 
-    # Recent declarations at a location (for the bottom panel)
-    def get_recent_declarations_at_location(self, locid: str, limit: int = 200) -> pd.DataFrame:
-        df = self._safe_fetch(f"""
+    def get_recent_declarations_at_location(self, locid, limit=200):
+        sql = f"""
             SELECT
                 se.entryid,
                 se.itemid,
@@ -188,9 +258,9 @@ class DeclareHandler(DatabaseManager):
             WHERE se.locid = %s AND se.note = 'declare'
             ORDER BY se.entrydate DESC, se.entryid DESC
             LIMIT %s
-        """, (str(locid), int(limit)),
-        empty_cols=["entryid","itemid","name","barcode","quantity","entrydate"])
-        return df
+        """
+        df = self._debug_wrap_fetch("get_recent_declarations_at_location", sql, (str(locid), int(limit)))
+        return df if not df.empty else pd.DataFrame(columns=["entryid", "itemid", "name", "barcode", "quantity", "entrydate"])
 
 # ---------------- STYLE ----------------
 st.markdown("""
@@ -214,10 +284,22 @@ st.session_state.setdefault("picked_locid", "")  # updated by map clicks
 handler = DeclareHandler()
 map_handler = ShelfMapHandler()
 
+# Show identity & privilege snapshot in debug
+if DEBUG:
+    info = handler.whoami()
+    debug_kv("Session & Privileges Snapshot",
+             current_user=info.get("current_user"),
+             session_user=info.get("session_user"),
+             search_path=info.get("search_path"),
+             shelfentries_priv=info.get("shelfentries_priv"))
+
 tab1, tab2 = st.tabs(["📷 Scan via camera", "⌨️ Type/paste barcode"])
 
 # ---------------- CORE FLOW ----------------
-def declare_logic(barcode: str, reset_callback) -> None:
+def declare_logic(barcode, reset_callback):
+    # Trace the entry state
+    debug_kv("declare_logic entry", barcode=barcode)
+
     item = None
     itemid = None
     if barcode:
@@ -250,9 +332,28 @@ def declare_logic(barcode: str, reset_callback) -> None:
     )
 
     # ---------- Data pulls ----------
-    item_locs_history = handler.get_item_locations(itemid)         # safe-fallback on perms
-    inventory_total = handler.get_inventory_total(itemid)          # read-only info
-    shelf_locs = map_handler.get_locations()                       # FULL MAP
+    try:
+        item_locs_history = handler.get_item_locations(itemid)
+    except Exception as e:
+        st.error("Failed to fetch historical shelf locations for this item.")
+        if DEBUG:
+            debug_box("get_item_locations Exception", repr(e))
+        return
+
+    try:
+        inventory_total = handler.get_inventory_total(itemid)  # read-only info
+    except Exception as e:
+        inventory_total = 0
+        if DEBUG:
+            debug_box("get_inventory_total Exception (non-fatal)", repr(e))
+
+    try:
+        shelf_locs = map_handler.get_locations()  # FULL MAP from your ShelfMapHandler
+    except Exception as e:
+        st.error("Failed to load shelf map locations.")
+        if DEBUG:
+            debug_box("map_handler.get_locations Exception", repr(e))
+        return
 
     # ---------- MAP (click to select) ----------
     st.markdown("#### 🗺️ Click a shelf to select it")
@@ -267,19 +368,19 @@ def declare_logic(barcode: str, reset_callback) -> None:
 
     # Extract clicked object → update picked_locid
     try:
-        sel = getattr(event, "selection", None) or (event.get("selection") if isinstance(event, dict) else None)
+        sel = getattr(event, "selection", None) or event.get("selection") if isinstance(event, dict) else None
         if sel:
             objs = sel.get("objects", {}) if isinstance(sel, dict) else {}
             picked_list = objs.get("shelves") or []
             if picked_list:
                 first = picked_list[0]
                 data = first.get("object") if isinstance(first, dict) and "object" in first else first
-                locid_clicked = str((data or {}).get("locid") or "")
+                locid_clicked = str(data.get("locid") or "")
                 if locid_clicked:
                     st.session_state["picked_locid"] = locid_clicked
-    except Exception:
-        # fail gracefully if selection payload changes
-        pass
+    except Exception as e:
+        if DEBUG:
+            debug_box("Selection parse Exception (non-fatal)", repr(e))
 
     # ---------- Chosen shelf ----------
     chosen_locid = st.session_state["picked_locid"]
@@ -322,8 +423,13 @@ def declare_logic(barcode: str, reset_callback) -> None:
             st.error("Quantity must be greater than zero to declare.")
             return
 
-        # Append-only: insert a new row into shelfentries (NO expirationdate)
-        handler.insert_declaration(itemid=itemid, locid=final_locid, qty=new_qty)
+        try:
+            handler.insert_declaration(itemid=itemid, locid=final_locid, qty=new_qty, who="DeclarePage")
+        except Exception as e:
+            st.error("Failed to record declaration. See debug for details.")
+            if DEBUG:
+                debug_box("insert_declaration Exception", repr(e))
+            return
 
         st.success(f"Recorded declaration for '{item['name']}' at {final_locid} with quantity {new_qty}.")
 
@@ -336,7 +442,7 @@ def declare_logic(barcode: str, reset_callback) -> None:
         }
         st.rerun()
 
-def show_latest_declaration_and_items() -> None:
+def show_latest_declaration_and_items():
     latest = st.session_state.get("latest_declaration")
     if latest and "itemid" in latest:
         st.markdown(
@@ -351,7 +457,14 @@ def show_latest_declaration_and_items() -> None:
             </div>""",
             unsafe_allow_html=True
         )
-        recents = DeclareHandler().get_recent_declarations_at_location(latest["locid"])
+        try:
+            recents = DeclareHandler().get_recent_declarations_at_location(latest["locid"])
+        except Exception as e:
+            st.error("Failed to load recent declarations for this location.")
+            if DEBUG:
+                debug_box("get_recent_declarations_at_location Exception", repr(e))
+            return
+
         if not recents.empty:
             st.markdown(
                 f"<br/><b>Recent declarations at location <span style='color:#098A23'>{latest['locid']}</span>:</b>",
